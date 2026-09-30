@@ -6,6 +6,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.SurfaceTexture;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -13,9 +15,13 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Size;
 import android.view.LayoutInflater;
+import android.view.Gravity;
+import android.view.Surface;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.TextView;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -50,6 +56,32 @@ public class PersonalHomeFragment extends Fragment {
     private boolean registered;
     private TextView timer, status, summary, hint;
     private MaterialButton recordButton, cameraButton;
+    private TextureView preview;
+    private View previewClock;
+    private Surface previewSurface;
+    private Class<?> previewOwner;
+    private Surface attachedSurface;
+    private int attachedWidth, attachedHeight;
+    private boolean previewForeground;
+
+    private final TextureView.SurfaceTextureListener previewListener = new TextureView.SurfaceTextureListener() {
+        @Override public void onSurfaceTextureAvailable(@NonNull SurfaceTexture texture, int width, int height) {
+            releasePreviewSurface();
+            previewSurface = new Surface(texture);
+            syncPreview();
+        }
+
+        @Override public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture texture, int width, int height) {
+            syncPreview();
+        }
+
+        @Override public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture texture) {
+            releasePreviewSurface();
+            return true;
+        }
+
+        @Override public void onSurfaceTextureUpdated(@NonNull SurfaceTexture texture) { }
+    };
 
     private final ActivityResultLauncher<String[]> permissions = registerForActivityResult(
             new ActivityResultContracts.RequestMultiplePermissions(), result -> {
@@ -97,7 +129,11 @@ public class PersonalHomeFragment extends Fragment {
                     || Constants.BROADCAST_ON_DUAL_RECORDING_STARTED.equals(action)
                     || Constants.BROADCAST_ON_RECORDING_RESUMED.equals(action)
                     || Constants.BROADCAST_ON_DUAL_RECORDING_RESUMED.equals(action)) {
-                state = RecordingState.IN_PROGRESS;
+                // Single-camera STARTED also announces STARTING before its
+                // encoder/session is ready. Honor the service's actual state.
+                RecordingState reported = Utils.getSerializableExtraCompat(intent,
+                        Constants.INTENT_EXTRA_RECORDING_STATE, RecordingState.class);
+                state = reported != null ? reported : RecordingState.IN_PROGRESS;
             } else {
                 Toast.makeText(context, R.string.personal_home_recording_failed, Toast.LENGTH_LONG).show();
                 queryState();
@@ -121,6 +157,9 @@ public class PersonalHomeFragment extends Fragment {
         hint = view.findViewById(R.id.personal_home_hint);
         recordButton = view.findViewById(R.id.personal_home_record);
         cameraButton = view.findViewById(R.id.personal_home_camera);
+        preview = view.findViewById(R.id.personal_home_preview);
+        previewClock = view.findViewById(R.id.personal_home_clock);
+        preview.setSurfaceTextureListener(previewListener);
         recordButton.setOnClickListener(v -> performRecordAction());
         cameraButton.setOnClickListener(v -> chooseCamera());
         view.findViewById(R.id.personal_home_settings).setOnClickListener(v -> openSettings());
@@ -153,15 +192,29 @@ public class PersonalHomeFragment extends Fragment {
 
     @Override public void onResume() {
         super.onResume();
+        previewForeground = true;
         if (timer != null) { queryState(); render(); }
+    }
+
+    @Override public void onPause() {
+        previewForeground = false;
+        detachPreview();
+        if (preview != null) preview.setVisibility(View.INVISIBLE);
+        super.onPause();
     }
 
     @Override public void onHiddenChanged(boolean hidden) {
         super.onHiddenChanged(hidden);
+        if (hidden) {
+            detachPreview();
+            if (preview != null) preview.setVisibility(View.INVISIBLE);
+        }
         if (!hidden && timer != null) { queryState(); render(); }
     }
 
     @Override public void onStop() {
+        previewForeground = false;
+        detachPreview();
         if (registered) {
             requireContext().unregisterReceiver(recordingReceiver);
             registered = false;
@@ -171,6 +224,10 @@ public class PersonalHomeFragment extends Fragment {
     }
 
     @Override public void onDestroyView() {
+        releasePreviewSurface();
+        if (preview != null) preview.setSurfaceTextureListener(null);
+        preview = null;
+        previewClock = null;
         handler.removeCallbacksAndMessages(null);
         timer = status = summary = hint = null;
         recordButton = cameraButton = null;
@@ -207,6 +264,14 @@ public class PersonalHomeFragment extends Fragment {
             action = dual
                     ? new Intent(requireContext(), DualCameraRecordingService.class).setAction(Constants.INTENT_ACTION_START_DUAL_RECORDING)
                     : new Intent(requireContext(), RecordingService.class).setAction(Constants.INTENT_ACTION_START_RECORDING);
+            // Supply the foreground surface on the explicit start tap. This uses the
+            // existing recording pipeline; it never starts a separate preview camera.
+            if (!dual && previewForeground && !isHidden()
+                    && previewSurface != null && previewSurface.isValid()) {
+                action.putExtra("SURFACE", previewSurface);
+                action.putExtra("SURFACE_WIDTH", preview.getWidth());
+                action.putExtra("SURFACE_HEIGHT", preview.getHeight());
+            }
             state = RecordingState.STARTING;
             startTime = pauseTime = pausedDuration = 0L;
         } else {
@@ -217,6 +282,13 @@ public class PersonalHomeFragment extends Fragment {
         }
         try {
             ServiceStartPolicy.startRecordingAction(requireContext(), action);
+            if (Constants.INTENT_ACTION_START_RECORDING.equals(action.getAction()) && action.hasExtra("SURFACE")) {
+                // Remember the start-intent surface too, so leaving immediately after
+                // tapping Start still detaches it before the first state callback.
+                previewOwner = RecordingService.class;
+                attachedSurface = previewSurface;
+                attachedWidth = attachedHeight = 0;
+            }
         } catch (RuntimeException e) {
             Toast.makeText(requireContext(), R.string.personal_home_recording_failed, Toast.LENGTH_LONG).show();
             queryState();
@@ -300,7 +372,75 @@ public class PersonalHomeFragment extends Fragment {
                 prefs.getSpecificVideoFrameRate(camera), getString(prefs.isRecordAudioEnabled()
                         ? R.string.personal_home_audio_on : R.string.personal_home_audio_off)));
         hint.setText(hasRecordingPermissions() ? R.string.personal_home_hint : R.string.personal_home_permission_hint);
+        syncPreview();
         renderTimer();
+    }
+
+    /** Attach only to an existing recording session while the home screen is foreground. */
+    private void syncPreview() {
+        if (preview == null || previewClock == null || !isAdded()) return;
+        boolean show = previewForeground && !isHidden() && state != null && state != RecordingState.NONE;
+        preview.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
+        FrameLayout.LayoutParams clockLayout = (FrameLayout.LayoutParams) previewClock.getLayoutParams();
+        int clockSize = Math.round(236 * getResources().getDisplayMetrics().density);
+        clockLayout.width = show ? ViewGroup.LayoutParams.MATCH_PARENT : clockSize;
+        clockLayout.height = show ? ViewGroup.LayoutParams.WRAP_CONTENT : clockSize;
+        clockLayout.gravity = show ? Gravity.BOTTOM : Gravity.CENTER;
+        previewClock.setLayoutParams(clockLayout);
+        if (show) previewClock.setBackgroundColor(Color.parseColor("#B3101916"));
+        else previewClock.setBackgroundResource(R.drawable.personal_timer_background);
+        timer.setTextSize(show ? 28 : 46);
+        if (!show || previewSurface == null || !previewSurface.isValid()) {
+            detachPreview();
+            return;
+        }
+        Context context = requireContext();
+        boolean dual = ServiceUtils.isServiceRunning(context, DualCameraRecordingService.class);
+        Class<?> service = dual ? DualCameraRecordingService.class : RecordingService.class;
+        // The dual pipeline accepts a surface once its STARTED event arrives.
+        // Single-camera STARTING accepts the surface to avoid its preview wait timeout.
+        if (dual && state != RecordingState.IN_PROGRESS && state != RecordingState.PAUSED) return;
+        if (!ServiceUtils.isServiceRunning(context, service)) return;
+        int width = preview.getWidth(), height = preview.getHeight();
+        if (width <= 0 || height <= 0) return;
+        if (previewOwner == service && attachedSurface == previewSurface
+                && attachedWidth == width && attachedHeight == height) return;
+        if (previewOwner != null && previewOwner != service) detachPreview();
+        try {
+            context.startService(new Intent(context, service).setAction(Constants.INTENT_ACTION_CHANGE_SURFACE)
+                    .putExtra("SURFACE", previewSurface).putExtra("SURFACE_WIDTH", width).putExtra("SURFACE_HEIGHT", height));
+            previewOwner = service;
+            attachedSurface = previewSurface;
+            attachedWidth = width;
+            attachedHeight = height;
+            FLog.d(TAG, "Attached live preview to " + service.getSimpleName() + " " + width + "x" + height);
+        } catch (RuntimeException e) {
+            FLog.w(TAG, "Could not attach recording preview", e);
+        }
+    }
+
+    private void detachPreview() {
+        Class<?> owner = previewOwner;
+        previewOwner = null;
+        attachedSurface = null;
+        attachedWidth = attachedHeight = 0;
+        Context context = getContext();
+        if (owner == null || context == null || !ServiceUtils.isServiceRunning(context, owner)) return;
+        try {
+            context.startService(new Intent(context, owner).setAction(Constants.INTENT_ACTION_CHANGE_SURFACE)
+                    .putExtra("SURFACE", (Surface) null));
+            FLog.d(TAG, "Detached foreground recording preview");
+        } catch (RuntimeException e) {
+            FLog.w(TAG, "Could not detach recording preview", e);
+        }
+    }
+
+    private void releasePreviewSurface() {
+        detachPreview();
+        if (previewSurface != null) {
+            previewSurface.release();
+            previewSurface = null;
+        }
     }
 
     private void renderTimer() {

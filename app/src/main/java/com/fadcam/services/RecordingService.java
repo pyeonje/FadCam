@@ -81,6 +81,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 // Add Intent import
 
@@ -154,6 +155,10 @@ public class RecordingService extends Service {
     private boolean previewOnlyActive = false;
     private boolean pendingPreviewOnlyStart = false;
     private volatile boolean previewSessionConfigInFlight = false;
+    // Camera-open and preview-surface callbacks can both observe STARTING
+    // before CameraCaptureSession.onConfigured transitions the state. Claim
+    // the whole pipeline startup once, including its queued background work.
+    private final AtomicBoolean recordingStartDispatched = new AtomicBoolean(false);
     private AtomicInteger ffmpegProcessingTaskCount = new AtomicInteger(0);
 
     private boolean isRecordingTorchEnabled = false;
@@ -1675,6 +1680,7 @@ public class RecordingService extends Service {
                     durationLimitController.stopSession();
                 }
                 // Update the UI and Service state atomically
+                recordingStartDispatched.set(false);
                 recordingState = RecordingState.STARTING;
                 // Clear a stale stopping flag from a previous recording that
                 // may still be cleaning up asynchronously on a background thread.
@@ -4412,7 +4418,7 @@ public class RecordingService extends Service {
     // wait -----------
     private void attemptStartRecordingIfReady() {
         try {
-            if (recordingState != RecordingState.STARTING) {
+            if (isStopping || recordingState != RecordingState.STARTING) {
                 FLog.d(TAG, "attemptStartRecordingIfReady: Not in STARTING state (" + recordingState + ")");
                 return;
             }
@@ -4427,6 +4433,13 @@ public class RecordingService extends Service {
                     return;
                 }
                 waitForPreviewBeforeStart = false;
+            }
+            // Keep this claim through pipeline initialization AND capture-session
+            // configuration. Resetting after startRecording() returns would allow
+            // another callback to create a second pipeline while still STARTING.
+            if (!recordingStartDispatched.compareAndSet(false, true)) {
+                FLog.d(TAG, "Recording pipeline startup already dispatched; ignoring duplicate readiness callback");
+                return;
             }
             // Clear timeout if set
             if (previewWaitTimeoutRunnable != null) {

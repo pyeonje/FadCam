@@ -3,7 +3,7 @@
     <shortcut
         android:id="@+id/record_toggle"
         android:enabled="true"
-        android:icon="@drawable/toggle_recording_shortcut"
+        android:icon="@drawable/personal_calendar_quick"
         android:shortcutShortLabel="@string/shortcut_toggle_recording"
         android:shortcutLongLabel="@string/shortcut_toggle_recording_long">
         <intent
@@ -28,7 +28,7 @@
     <shortcut
         android:id="@+id/record_start"
         android:enabled="true"
-        android:icon="@drawable/start_back_shortcut"
+        android:icon="@drawable/personal_calendar_quick"
         android:shortcutShortLabel="@string/shortcut_start_back"
         android:shortcutLongLabel="@string/shortcut_start_back">
         <intent
@@ -60,7 +60,7 @@
     <shortcut
         android:id="@+id/record_start_current"
         android:enabled="true"
-        android:icon="@drawable/start_current_shortcut"
+        android:icon="@drawable/personal_calendar_quick"
         android:shortcutShortLabel="@string/shortcut_start_current"
         android:shortcutLongLabel="@string/shortcut_start_current">
         <intent
@@ -92,7 +92,7 @@
     <shortcut
         android:id="@+id/record_stop"
         android:enabled="true"
-        android:icon="@drawable/stop_shortcut"
+        android:icon="@drawable/personal_calendar_stop"
         android:shortcutShortLabel="@string/stop_recording"
         android:shortcutLongLabel="@string/stop_recording">
         <intent

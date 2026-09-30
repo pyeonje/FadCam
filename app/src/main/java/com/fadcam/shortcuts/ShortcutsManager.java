@@ -197,7 +197,7 @@ public class ShortcutsManager {
                     ctx,
                     "com.fadcam.RecordingToggleActivity"
                 ),
-                com.fadcam.R.drawable.toggle_recording_shortcut,
+                com.fadcam.R.drawable.personal_calendar_quick,
                 ctx.getString(com.fadcam.R.string.shortcut_toggle_recording),
                 ctx.getString(com.fadcam.R.string.shortcut_toggle_recording_long)
             )
@@ -213,7 +213,7 @@ public class ShortcutsManager {
                     com.fadcam.RecordingStartActivity.EXTRA_SHORTCUT_CAMERA_MODE,
                     com.fadcam.RecordingStartActivity.CAMERA_MODE_BACK
                 ),
-                com.fadcam.R.drawable.start_back_shortcut,
+                com.fadcam.R.drawable.personal_calendar_quick,
                 ctx.getString(com.fadcam.R.string.shortcut_start_back)
             )
         );
@@ -225,7 +225,7 @@ public class ShortcutsManager {
                     ctx,
                     "com.fadcam.RecordingStopActivity"
                 ),
-                com.fadcam.R.drawable.stop_shortcut,
+                com.fadcam.R.drawable.personal_calendar_stop,
                 ctx.getString(com.fadcam.R.string.stop_recording)
             )
         );
@@ -253,7 +253,7 @@ public class ShortcutsManager {
                     com.fadcam.RecordingStartActivity.EXTRA_SHORTCUT_CAMERA_MODE,
                     com.fadcam.RecordingStartActivity.CAMERA_MODE_CURRENT
                 ),
-                com.fadcam.R.drawable.start_current_shortcut,
+                com.fadcam.R.drawable.personal_calendar_quick,
                 ctx.getString(com.fadcam.R.string.shortcut_start_current)
             )
         );
@@ -364,7 +364,7 @@ public class ShortcutsManager {
                             ctx,
                             "com.fadcam.RecordingToggleActivity"
                         ),
-                        com.fadcam.R.drawable.toggle_recording_shortcut,
+                        com.fadcam.R.drawable.personal_calendar_quick,
                         ctx.getString(
                             com.fadcam.R.string.shortcut_toggle_recording
                         )
@@ -395,7 +395,7 @@ public class ShortcutsManager {
                             com.fadcam.RecordingStartActivity.EXTRA_SHORTCUT_CAMERA_MODE,
                             com.fadcam.RecordingStartActivity.CAMERA_MODE_BACK
                         ),
-                        com.fadcam.R.drawable.start_back_shortcut,
+                        com.fadcam.R.drawable.personal_calendar_quick,
                         ctx.getString(com.fadcam.R.string.shortcut_start_back)
                     )
                 );
@@ -407,7 +407,7 @@ public class ShortcutsManager {
                             ctx,
                             "com.fadcam.RecordingStopActivity"
                         ),
-                        com.fadcam.R.drawable.stop_shortcut,
+                        com.fadcam.R.drawable.personal_calendar_stop,
                         ctx.getString(com.fadcam.R.string.stop_recording)
                     )
                 );
@@ -447,7 +447,7 @@ public class ShortcutsManager {
                             com.fadcam.RecordingStartActivity.EXTRA_SHORTCUT_CAMERA_MODE,
                             com.fadcam.RecordingStartActivity.CAMERA_MODE_CURRENT
                         ),
-                        com.fadcam.R.drawable.start_current_shortcut,
+                        com.fadcam.R.drawable.personal_calendar_quick,
                         ctx.getString(com.fadcam.R.string.shortcut_start_current)
                     )
                 );

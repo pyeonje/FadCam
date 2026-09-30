@@ -4,8 +4,8 @@ The personal package is `com.pyeonje.fadcam.beta` for the default debug build. T
 
 Launcher entries:
 
-- **FadCam Personal**: setup, recording settings, files, and shortcut customization.
-- **촬영 시작**: starts using the saved camera selection and recording settings after camera/microphone permissions are complete. Missing preparation opens setup instead.
+- **FadCam** (blue calendar): recording with a live preview, settings, files, and shortcut customization.
+- **바로촬영/중지** (orange calendar with a green dot): starts using saved camera/recording settings, or stops the active session, without showing recording UI. Missing preparation opens setup instead.
 
 Upstream shortcut customization remains available: rename an action, choose an icon image, and pin it to the home screen. The installed app drawer entry has a fixed packaged label/icon; arbitrary runtime name/image changes apply to pinned home screen shortcuts.
 
@@ -17,7 +17,7 @@ Gradle installation is restricted to the main phone profile (`--user 0`). Do not
 
 `local.properties` (ignored) supplies the SDK directory and the sibling `FadCam-media3-patched` checkout. The required source revision is recorded in `personal-build.lock.json`. The modified Media3 build is essential to preserve FadCam's hybrid MP4 finalization behavior; do not silently replace it with unmodified Maven Media3.
 
-Installation does not grant runtime permissions or start a recording. Recording reliability and the applied video settings must be checked in an intentional later recording session.
+Installation does not grant runtime permissions or start a recording. Intentional recording validation results are recorded below.
 ## Initial installation verification — 2026-09-30
 
 - Default debug build and Gradle installation completed successfully on SM-S928N, Android 16 / API 36.
@@ -35,3 +35,13 @@ Android 16 launch warning diagnosis: the shipped TensorFlow Task Vision native l
 Recording lifecycle/state broadcasts are package-targeted so the private receiver receives them under Android 14+ intent restrictions. This fixes a new home screen remaining stuck at state synchronization. Swipes/DPAD traverse only the three visible tabs, and restored upstream home/settings fragments are replaced with personal screens.
 
 Device validation: rebuilt and installed using Gradle on main user 0 only; DUAL_APP user 95 remains absent. Cold launch/relaunch shows the new Korean home without the compatibility dialog. Idle state is synchronized to NONE, with the start button enabled. Settings and shortcut screens were opened without starting capture. No recording was made; video output, actual FPS, and screen-off recording reliability are still not verified.
+
+## Live preview and calendar controls — 2026-09-30
+
+The recording tab attaches a TextureView to the existing recording pipeline while foreground recording is active, including when opening the main app during a quick-start session. Leaving the screen detaches the preview without stopping recording. The quick launcher uses a separate task affinity so Samsung One UI executes its action rather than bringing the existing main task to the front. It remains a launcher entry of the same APK, not a second installed package. Its home-screen icon was placed in the empty first cell of the second app row on the existing middle home page.
+
+Main/quick adaptive and monochrome icons use distinct calendar designs. Default pinned start/stop/toggle icons also use the calendar family; custom shortcut images and labels retain priority.
+
+Restoring preview exposed an upstream camera/surface readiness race: both callbacks could queue pipeline startup before the capture session changed STARTING to IN_PROGRESS. RecordingService now claims startup once per accepted session with AtomicBoolean. The focused regression check in `tools/verify_start_dispatch.ps1` exercises the production readiness method with repeated/concurrent callbacks, delayed session configuration, stopping, and a subsequent session.
+
+Device validation on SM-S928N / Android 16: Gradle installed only in user 0, with user 95 absent; all 13 native libraries passed 16KB alignment. Main-button recording displayed the live camera image. Actual home-icon taps started and stopped capture while keeping the launcher visible; opening the main app during that session displayed preview, and returning home detached it while capture continued. Disposable recordings used the saved rear camera, 4K portrait output (2160×3840), target 30 FPS, and audio settings. FFmpeg decode passed, ffprobe reported positive durations, and finalized moov stsz matched embedded moof trun sample sizes for both tracks with zero mismatches. Hybrid finalization embeds the original fragments inside the outer mdat; `tools/verify_recording_mp4.py` handles that layout. Short tests do not establish long-duration or screen-off reliability.

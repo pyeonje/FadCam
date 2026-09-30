@@ -69,12 +69,12 @@ public class ShortcutsSettingsFragment extends Fragment {
         } catch (Throwable ignored) {
         }
 
-        wireShortcutRow(view, R.id.cell_toggle, R.id.icon_toggle, R.drawable.toggle_recording_shortcut,
+        wireShortcutRow(view, R.id.cell_toggle, R.id.icon_toggle, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_toggle_recording),
                 new Intent(Intent.ACTION_VIEW)
                         .setClassName(requireContext(), "com.fadcam.RecordingToggleActivity"),
                 ShortcutsManager.ID_TOGGLE);
-        wireShortcutRow(view, R.id.cell_start, R.id.icon_start, R.drawable.start_back_shortcut,
+        wireShortcutRow(view, R.id.cell_start, R.id.icon_start, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_start_back),
                 new Intent(Intent.ACTION_VIEW)
                         .setClassName(requireContext(), "com.fadcam.RecordingStartActivity")
@@ -88,7 +88,7 @@ public class ShortcutsSettingsFragment extends Fragment {
                         .putExtra(com.fadcam.RecordingStartActivity.EXTRA_SHORTCUT_CAMERA_MODE,
                                 com.fadcam.RecordingStartActivity.CAMERA_MODE_FRONT),
                 ShortcutsManager.ID_START_FRONT);
-        wireShortcutRow(view, R.id.cell_start_current, R.id.icon_start_current, R.drawable.start_current_shortcut,
+        wireShortcutRow(view, R.id.cell_start_current, R.id.icon_start_current, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_start_current),
                 new Intent(Intent.ACTION_VIEW)
                         .setClassName(requireContext(), "com.fadcam.RecordingStartActivity")
@@ -102,7 +102,7 @@ public class ShortcutsSettingsFragment extends Fragment {
                         .putExtra(com.fadcam.RecordingStartActivity.EXTRA_SHORTCUT_CAMERA_MODE,
                                 com.fadcam.RecordingStartActivity.CAMERA_MODE_DUAL),
                 ShortcutsManager.ID_START_DUAL);
-        wireShortcutRow(view, R.id.cell_stop, R.id.icon_stop, R.drawable.stop_shortcut,
+        wireShortcutRow(view, R.id.cell_stop, R.id.icon_stop, R.drawable.personal_calendar_stop,
                 getString(R.string.stop_recording),
                 new Intent(Intent.ACTION_VIEW).setClassName(requireContext(), "com.fadcam.RecordingStopActivity"),
                 ShortcutsManager.ID_STOP);
@@ -472,13 +472,13 @@ public class ShortcutsSettingsFragment extends Fragment {
         if (view == null)
             return;
         // Toggle recording
-        wireShortcutRow(view, R.id.cell_toggle, R.id.icon_toggle, R.drawable.toggle_recording_shortcut,
+        wireShortcutRow(view, R.id.cell_toggle, R.id.icon_toggle, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_toggle_recording),
                 new Intent(Intent.ACTION_VIEW)
                         .setClassName(requireContext(), "com.fadcam.RecordingToggleActivity"),
                 ShortcutsManager.ID_TOGGLE);
         // Start
-        wireShortcutRow(view, R.id.cell_start, R.id.icon_start, R.drawable.start_back_shortcut,
+        wireShortcutRow(view, R.id.cell_start, R.id.icon_start, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_start_back),
                 new Intent(Intent.ACTION_VIEW)
                         .setClassName(requireContext(), "com.fadcam.RecordingStartActivity")
@@ -492,7 +492,7 @@ public class ShortcutsSettingsFragment extends Fragment {
                         .putExtra(com.fadcam.RecordingStartActivity.EXTRA_SHORTCUT_CAMERA_MODE,
                                 com.fadcam.RecordingStartActivity.CAMERA_MODE_FRONT),
                 ShortcutsManager.ID_START_FRONT);
-        wireShortcutRow(view, R.id.cell_start_current, R.id.icon_start_current, R.drawable.start_current_shortcut,
+        wireShortcutRow(view, R.id.cell_start_current, R.id.icon_start_current, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_start_current),
                 new Intent(Intent.ACTION_VIEW)
                         .setClassName(requireContext(), "com.fadcam.RecordingStartActivity")
@@ -507,7 +507,7 @@ public class ShortcutsSettingsFragment extends Fragment {
                                 com.fadcam.RecordingStartActivity.CAMERA_MODE_DUAL),
                 ShortcutsManager.ID_START_DUAL);
         // Stop
-        wireShortcutRow(view, R.id.cell_stop, R.id.icon_stop, R.drawable.stop_shortcut,
+        wireShortcutRow(view, R.id.cell_stop, R.id.icon_stop, R.drawable.personal_calendar_stop,
                 getString(R.string.stop_recording),
                 new Intent(Intent.ACTION_VIEW).setClassName(requireContext(), "com.fadcam.RecordingStopActivity"),
                 ShortcutsManager.ID_STOP);
