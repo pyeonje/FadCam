@@ -9,7 +9,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.RecordingToggleActivity"
-            android:targetPackage="com.fadcam" />
+            android:targetPackage="@string/shortcut_target_package" />
     </shortcut>
 
     <shortcut
@@ -22,7 +22,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.TorchToggleActivity"
-            android:targetPackage="com.fadcam" />
+            android:targetPackage="@string/shortcut_target_package" />
     </shortcut>
 
     <shortcut
@@ -34,7 +34,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.RecordingStartActivity"
-            android:targetPackage="com.fadcam">
+            android:targetPackage="@string/shortcut_target_package">
             <extra
                 android:name="shortcut_camera_mode"
                 android:value="back" />
@@ -50,7 +50,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.RecordingStartActivity"
-            android:targetPackage="com.fadcam">
+            android:targetPackage="@string/shortcut_target_package">
             <extra
                 android:name="shortcut_camera_mode"
                 android:value="front" />
@@ -66,7 +66,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.RecordingStartActivity"
-            android:targetPackage="com.fadcam">
+            android:targetPackage="@string/shortcut_target_package">
             <extra
                 android:name="shortcut_camera_mode"
                 android:value="current" />
@@ -82,7 +82,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.RecordingStartActivity"
-            android:targetPackage="com.fadcam">
+            android:targetPackage="@string/shortcut_target_package">
             <extra
                 android:name="shortcut_camera_mode"
                 android:value="dual" />
@@ -98,7 +98,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.RecordingStopActivity"
-            android:targetPackage="com.fadcam" />
+            android:targetPackage="@string/shortcut_target_package" />
     </shortcut>
 
     <shortcut
@@ -110,7 +110,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.PhotoCaptureActivity"
-            android:targetPackage="com.fadcam" />
+            android:targetPackage="@string/shortcut_target_package" />
     </shortcut>
 
     <shortcut
@@ -122,7 +122,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.PhotoCaptureActivity"
-            android:targetPackage="com.fadcam">
+            android:targetPackage="@string/shortcut_target_package">
             <extra
                 android:name="shortcut_photo_camera_mode"
                 android:value="front" />
@@ -138,6 +138,6 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetClass="com.fadcam.ScreenShotCaptureActivity"
-            android:targetPackage="com.fadcam" />
+            android:targetPackage="@string/shortcut_target_package" />
     </shortcut>
 </shortcuts>

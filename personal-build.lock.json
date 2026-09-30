@@ -1,0 +1,8 @@
+{
+  "upstream": "https://github.com/anonfaded/FadCam",
+  "upstreamCommit": "f275f69ca22cd9746e415a2727610934b6bb97d9",
+  "media3": "https://github.com/anonfaded/media3-patched",
+  "media3Commit": "51c6a4f96d4dc08d421682d96ecc5a044ea1decb",
+  "media3Branch": "release",
+  "recordingRuntimeTested": false
+}

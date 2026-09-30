@@ -1,5 +1,14 @@
 # Developer & Agent Guide: Best Practices for Workflow Orchestration and Task Management
 
+## Personal fork overrides
+
+- The default debug application ID is `com.pyeonje.fadcam.beta`; the Java namespace remains `com.fadcam`. Use this package instead of the upstream debug package in the device examples below.
+- Setup launcher: `com.pyeonje.fadcam.beta/com.fadcam.SplashActivity`.
+- Saved-settings recording launcher: `com.pyeonje.fadcam.beta/com.fadcam.PersonalRecordingStartActivity`.
+- Install with `:app:installDefaultDebug`, selecting the intended phone with `ANDROID_SERIAL`. `build-personal.ps1` provides the workstation's toolchain configuration.
+- Initial fork installation was verified without launching the app or recording. Start a recording only when the current task authorizes a recording session; installation-only verification checks the package and launcher registration.
+- Use the patched Media3 revision in `personal-build.lock.json`; local SDK and patched checkout paths belong in ignored `local.properties`.
+
 ## Workflow Orchestration
 
 ### 1. Plan Node Default

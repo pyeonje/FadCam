@@ -28,7 +28,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.fadcam"
+        applicationId = "com.pyeonje.fadcam"
         minSdk = 24
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -68,7 +68,7 @@ android {
             applicationIdSuffix = ".beta"
             isDebuggable = true
             versionNameSuffix = "-beta10.6" // Increment the beta version suffix for each release. Use `beta1` for the first beta release, then `beta2`, etc.
-            resValue("string", "app_name", "FadCam Beta")
+            resValue("string", "app_name", "FadCam Personal")
         }
         
         release {
@@ -148,6 +148,14 @@ android {
     // Variant filter: only build specific variants (modern API — the old
     // variantFilter{} is deprecated since AGP 8.x).
     androidComponents {
+        onVariants { variant ->
+            variant.resValues.put(
+                variant.makeResValueKey("string", "shortcut_target_package"),
+                variant.applicationId.map {
+                    com.android.build.api.variant.ResValue(it, "Actual package for shortcut intents")
+                }
+            )
+        }
         beforeVariants { variant ->
             val isPreBuiltFlavor = variant.name.contains("notesPro") || variant.name.contains("calcPro") || variant.name.contains("weatherPro")
             val isDefaultFlavor = variant.name.contains("default")

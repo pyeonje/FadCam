@@ -1,8 +1,10 @@
 package com.fadcam;
 
 import com.fadcam.FLog;
+import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.widget.Toast;
@@ -17,6 +19,7 @@ public class RecordingStartActivity extends Activity {
     public static final String CAMERA_MODE_FRONT = "front";
     public static final String CAMERA_MODE_CURRENT = "current";
     public static final String CAMERA_MODE_DUAL = "dual";
+    private boolean openingSetup;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -24,6 +27,21 @@ public class RecordingStartActivity extends Activity {
         
         try {
             SharedPreferencesManager sharedPreferencesManager = SharedPreferencesManager.getInstance(this);
+            // Both permissions are required by the upstream recording engine, even for muted video.
+            boolean missingPermissions = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                    != PackageManager.PERMISSION_GRANTED
+                    || ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED;
+            if (missingPermissions || !sharedPreferencesManager.sharedPreferences
+                    .getBoolean(Constants.COMPLETED_ONBOARDING_KEY, false)) {
+                openingSetup = true;
+                if (missingPermissions) {
+                    sharedPreferencesManager.setShowOnboarding(true);
+                    Toast.makeText(this, R.string.toast_permissions_required, Toast.LENGTH_LONG).show();
+                }
+                startActivity(new Intent(this, MainActivity.class));
+                return;
+            }
             // Check if recording is already in progress
             if (sharedPreferencesManager.isRecordingInProgress()) {
                 // Utils.showQuickToast(this, R.string.video_recording_started);
@@ -83,7 +101,9 @@ public class RecordingStartActivity extends Activity {
             Toast.makeText(this, "Failed to start recording", Toast.LENGTH_SHORT).show();
         } finally {
             // Prevent app from coming to foreground
-            moveTaskToBack(true);
+            if (!openingSetup) {
+                moveTaskToBack(true);
+            }
             finish();
         }
     }
@@ -97,6 +117,8 @@ public class RecordingStartActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        moveTaskToBack(true);
+        if (!openingSetup) {
+            moveTaskToBack(true);
+        }
     }
 }
