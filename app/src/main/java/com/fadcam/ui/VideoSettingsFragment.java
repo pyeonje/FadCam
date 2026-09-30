@@ -354,7 +354,7 @@ public class VideoSettingsFragment extends Fragment {
         int bitrate = getCurrentBitrate();
         boolean isCustom = getBitrateMode();
         valueBitrate.setText(
-                String.format(Locale.getDefault(), "%d Mbps %s", bitrate / 1000, isCustom ? "(Custom)" : "(Auto)"));
+                String.format(Locale.getDefault(), "%d Mbps %s", bitrate / 1000, getString(isCustom ? R.string.personal_bitrate_custom : R.string.personal_bitrate_auto)));
         // Bitrate helper removed from persistent UI
 
         // Zoom Ratio
@@ -664,8 +664,8 @@ public class VideoSettingsFragment extends Fragment {
         boolean custom = getBitrateMode();
         int currentValueMbps = getBitrateCustomValue() / 1000;
         java.util.ArrayList<com.fadcam.ui.picker.OptionItem> items = new java.util.ArrayList<>();
-        items.add(new com.fadcam.ui.picker.OptionItem("auto", "Auto"));
-        items.add(new com.fadcam.ui.picker.OptionItem("custom", "Custom (" + currentValueMbps + " Mbps)"));
+        items.add(new com.fadcam.ui.picker.OptionItem("auto", getString(R.string.personal_auto)));
+        items.add(new com.fadcam.ui.picker.OptionItem("custom", getString(R.string.personal_custom_bitrate, currentValueMbps)));
         final String resultKey = "picker_result_bitrate_mode";
         getParentFragmentManager().setFragmentResultListener(resultKey, this, (k, b) -> {
             String sel = b.getString(com.fadcam.ui.picker.PickerBottomSheetFragment.BUNDLE_SELECTED_ID);
@@ -805,17 +805,17 @@ public class VideoSettingsFragment extends Fragment {
                     if (isDefault) {
                         // For default camera, show both "Main" and lens type if it's not standard
                         if (lensType != null && !lensType.equals("Standard")) {
-                            display.append("Main (").append(lensType).append(")");
+                            display.append(getString(R.string.personal_lens_main)).append(" (").append(localizedLens(lensType)).append(")");
                             cameraType = "Main_" + lensType;
                         } else {
-                            display.append("Main");
+                            display.append(getString(R.string.personal_lens_main));
                             cameraType = "Main";
                         }
                     } else if (lensType != null) {
-                        display.append(lensType);
+                        display.append(localizedLens(lensType));
                         cameraType = lensType;
                     } else {
-                        display.append("Camera");
+                        display.append(getString(R.string.personal_lens_camera));
                         cameraType = "Camera_" + id;
                     }
 
@@ -1742,7 +1742,7 @@ public class VideoSettingsFragment extends Fragment {
             sizeLabel = "4 GB";
         else
             sizeLabel = "Custom (" + mb + " MB)";
-        label.setText("Current Size: " + sizeLabel);
+        label.setText(getString(R.string.personal_current_size, sizeLabel));
     }
 
     private void showVideoSplitSizeBottomSheet() {
@@ -1881,6 +1881,14 @@ public class VideoSettingsFragment extends Fragment {
     /**
      * Creates dynamic helper text for lens selection based on detected cameras
      */
+    private String localizedLens(String lens) {
+        if ("Ultra-Wide".equals(lens)) return getString(R.string.personal_lens_ultrawide);
+        if ("Wide-Angle".equals(lens)) return getString(R.string.personal_lens_wide);
+        if ("Telephoto".equals(lens)) return getString(R.string.personal_lens_tele);
+        if ("Portrait".equals(lens)) return getString(R.string.personal_lens_portrait);
+        return lens;
+    }
+
     private String createLensHelperText() {
         if (availableBackCameras.isEmpty()) {
             return getString(R.string.setting_back_lens_info_single_v2); // Fallback to static text
@@ -1891,7 +1899,7 @@ public class VideoSettingsFragment extends Fragment {
             return getString(R.string.setting_back_lens_info_single_v2);
         } else {
             StringBuilder helper = new StringBuilder();
-            helper.append("Detected ").append(cameraCount).append(" back cameras: ");
+            helper.append(getString(R.string.personal_lenses_detected, cameraCount));
             for (int i = 0; i < availableBackCameras.size(); i++) {
                 if (i > 0) helper.append(", ");
                 CameraIdInfo info = availableBackCameras.get(i);
@@ -1899,7 +1907,7 @@ public class VideoSettingsFragment extends Fragment {
                 String lensType = info.displayName.split(" \\(")[0];
                 helper.append(lensType);
             }
-            helper.append(". Select the lens you want to use for recording.");
+            helper.append(getString(R.string.personal_lens_select_hint));
             return helper.toString();
         }
     }
@@ -1913,8 +1921,7 @@ public class VideoSettingsFragment extends Fragment {
         // Get the default zoom ratio for this camera type
         float defaultZoom = prefs.getSpecificZoomRatio(cameraType);
         
-        helper.append("Zoom ratio controls the field of view. ");
-        helper.append("Default is ").append(String.format(Locale.getDefault(), "%.1fx", defaultZoom));
+        helper.append(getString(R.string.personal_zoom_hint, defaultZoom));
         
         // Add information about auto-selection for wide-angle cameras
         if (cameraType == CameraType.BACK) {
@@ -1922,12 +1929,12 @@ public class VideoSettingsFragment extends Fragment {
             if (selectedCameraId != null && !selectedCameraId.equals(Constants.DEFAULT_BACK_CAMERA_ID)) {
                 // Check if this is a wide-angle camera
                 if (isWideAngleCamera(selectedCameraId)) {
-                    helper.append(" (auto-selected 0.5x for wide-angle lens to show full field of view)");
+                    helper.append(getString(R.string.personal_zoom_wide_hint));
                 }
             }
         }
         
-        helper.append(". Lower values = wider view, higher values = more zoomed in.");
+        helper.append(getString(R.string.personal_zoom_range_hint));
         return helper.toString();
     }
     

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="personal_home_title">촬영</string>
+    <string name="personal_home_subtitle">저장한 설정으로, 한 번에 시작</string>
+    <string name="personal_home_start">촬영 시작</string>
+    <string name="personal_home_stop">촬영 정지</string>
+    <string name="personal_home_ready">촬영 준비됨</string>
+    <string name="personal_home_recording">촬영 중</string>
+    <string name="personal_home_paused">일시 정지</string>
+    <string name="personal_home_starting">촬영 시작 중…</string>
+    <string name="personal_home_waiting">카메라 대기 중…</string>
+    <string name="personal_home_syncing">촬영 상태 확인 중…</string>
+    <string name="personal_home_hint">화면을 꺼도 촬영이 계속됩니다.\n알림 또는 이 화면에서 정지하세요.</string>
+    <string name="personal_home_permission_hint">카메라와 마이크 권한을 허용해 주세요.\n허용 후 촬영 버튼을 다시 누르면 시작됩니다.</string>
+    <string name="personal_home_grant_permissions">권한 허용</string>
+    <string name="personal_home_permissions_ready">준비됐습니다. 원할 때 촬영 시작을 누르세요.</string>
+    <string name="personal_home_permissions_needed">카메라와 마이크 권한이 필요합니다.</string>
+    <string name="personal_home_recording_failed">촬영을 계속할 수 없습니다. 설정과 남은 저장 공간을 확인하세요.</string>
+    <string name="personal_home_back">후면 카메라</string>
+    <string name="personal_home_front">전면 카메라</string>
+    <string name="personal_home_dual">듀얼 카메라</string>
+    <string name="personal_home_camera_title">다음 촬영에 사용할 카메라</string>
+    <string name="personal_home_summary_format">%1$d × %2$d · %3$d FPS · %4$s</string>
+    <string name="personal_home_audio_on">음성 켜짐</string>
+    <string name="personal_home_audio_off">음성 꺼짐</string>
+    <string name="personal_home_settings">촬영 설정</string>
+    <string name="personal_home_shortcuts">바로가기 꾸미기</string>
+</resources>

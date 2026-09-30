@@ -1,0 +1,27 @@
+<resources>
+    <style name="Theme.PersonalRecorder" parent="Theme.FadCam.Amoled">
+        <item name="android:colorBackground">#111315</item>
+        <item name="android:windowBackground">#111315</item>
+        <item name="backgroundColor">#111315</item>
+        <item name="colorSurface">#171A1C</item>
+        <item name="colorHeading">#F3F6F4</item>
+        <item name="colorPrimary">#32B978</item>
+        <item name="colorSecondary">#32B978</item>
+        <item name="colorAccent">#32B978</item>
+        <item name="colorOnPrimary">#07170F</item>
+        <item name="colorButton">#32B978</item>
+        <item name="colorToggle">#32B978</item>
+        <item name="colorTopBar">#111315</item>
+        <item name="colorBottomNav">#171A1C</item>
+        <item name="colorStatusBar">#111315</item>
+        <item name="sectionHeaderColor">#9CA7A2</item>
+        <item name="pickerButtonBackground">#32B978</item>
+        <item name="pickerButtonText">#07170F</item>
+        <item name="pickerIconTint">#32B978</item>
+        <item name="pickerSliderActive">#32B978</item>
+        <item name="pickerSliderInactive">#355346</item>
+        <item name="pickerGradientStart">#111315</item>
+        <item name="pickerGradientMid">#171F1B</item>
+        <item name="pickerGradientEnd">#20362A</item>
+    </style>
+</resources>

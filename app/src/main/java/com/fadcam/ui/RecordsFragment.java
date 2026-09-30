@@ -1109,24 +1109,24 @@ public class RecordsFragment extends BaseFragment implements
             // Finished state
             if (snapshot.getState() == BatchOperationSessionSnapshot.State.COMPLETED_SUCCESS) {
                 deletionDockTitle.animateSlot(
-                        getOperationTypeName(snapshot.getOperationType()) + " completed", 300);
+                        getString(R.string.personal_operation_completed, getOperationTypeName(snapshot.getOperationType())), 300);
                 deletionDockIcon.setImageResource(R.drawable.ic_check_circle);
-                deletionDockCurrentItem.setText("Successfully processed " + snapshot.getCompletedItemCount() + " items");
+                deletionDockCurrentItem.setText(getString(R.string.personal_processed, snapshot.getCompletedItemCount()));
             } else if (snapshot.getState() == BatchOperationSessionSnapshot.State.COMPLETED_PARTIAL) {
                 deletionDockTitle.animateSlot(
-                        getOperationTypeName(snapshot.getOperationType()) + " completed",
+                        getString(R.string.personal_operation_completed, getOperationTypeName(snapshot.getOperationType())),
                         300);
                 deletionDockIcon.setImageResource(R.drawable.ic_error);
-                deletionDockCurrentItem.setText("Processed " + snapshot.getCompletedItemCount() + ", skipped " + snapshot.getSkippedItemCount());
+                deletionDockCurrentItem.setText(getString(R.string.personal_processed_skipped, snapshot.getCompletedItemCount(), snapshot.getSkippedItemCount()));
             } else {
                 deletionDockTitle.animateSlot(
-                        getOperationTypeName(snapshot.getOperationType()) + " failed", 300);
+                        getString(R.string.personal_operation_failed, getOperationTypeName(snapshot.getOperationType())), 300);
                 deletionDockIcon.setImageResource(R.drawable.ic_error);
-                deletionDockCurrentItem.setText("Failed to process " + snapshot.getFailedItemCount() + " items");
+                deletionDockCurrentItem.setText(getString(R.string.personal_process_failed, snapshot.getFailedItemCount()));
             }
             deletionDockProgress.setProgress(100);
             deletionDockEta.setText(getString(R.string.records_delete_header_dismiss_hint));
-            deletionDockSummary.setText("Completed: " + snapshot.getCompletedItemCount() + "/" + snapshot.getTotalItemCount() + " (Failed: " + snapshot.getFailedItemCount() + ")");
+            deletionDockSummary.setText(getString(R.string.personal_batch_progress_total, snapshot.getCompletedItemCount(), snapshot.getTotalItemCount(), snapshot.getFailedItemCount()));
             showDeletionDockActionButton(true, false, immediate);
             animateDeletionDock(true, immediate);
             return;
@@ -1143,7 +1143,7 @@ public class RecordsFragment extends BaseFragment implements
                 : snapshot.getCurrentItemName());
         String eta = buildBatchOperationEta(snapshot);
         deletionDockEta.setText(eta == null ? getString(R.string.records_delete_header_working) : eta);
-        deletionDockSummary.setText("Completed: " + snapshot.getCompletedItemCount() + ", Failed: " + snapshot.getFailedItemCount());
+        deletionDockSummary.setText(getString(R.string.personal_batch_progress, snapshot.getCompletedItemCount(), snapshot.getFailedItemCount()));
         showDeletionDockActionButton(true, true, immediate);
         animateDeletionDock(true, immediate);
     }
@@ -2314,7 +2314,7 @@ public class RecordsFragment extends BaseFragment implements
 
         TextView progressText = dialogView.findViewById(R.id.progress_text);
         if (progressText != null) {
-            progressText.setText("Saving '" + fileName + "'..."); // Indicate which file
+            progressText.setText(getString(R.string.personal_saving_file, fileName)); // Indicate which file
             // Set text color based on theme
             progressText.setTextColor(ContextCompat.getColor(requireContext(),
                     isSnowVeilTheme ? android.R.color.black : android.R.color.white));

@@ -1874,6 +1874,7 @@ public class DualCameraRecordingService extends Service {
 
     private void broadcastError(@NonNull String reason) {
         Intent intent = new Intent(Constants.BROADCAST_ON_DUAL_CAMERA_ERROR);
+        intent.setPackage(getPackageName());
         intent.putExtra("error_reason", reason);
         sendBroadcast(intent);
     }
@@ -1881,6 +1882,7 @@ public class DualCameraRecordingService extends Service {
     private void broadcastRecordingComplete(boolean success) {
         try {
             Intent recordingCompleteIntent = new Intent(Constants.ACTION_RECORDING_COMPLETE);
+            recordingCompleteIntent.setPackage(getPackageName());
             recordingCompleteIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, success);
             if (lastRecordingUriString != null && !lastRecordingUriString.isEmpty()) {
                 recordingCompleteIntent.putExtra(Constants.EXTRA_RECORDING_URI_STRING, lastRecordingUriString);

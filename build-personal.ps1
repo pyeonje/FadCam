@@ -10,12 +10,21 @@ $env:GRADLE_USER_HOME = 'C:\Users\vuswn\Documents\Codex\.tools\gradle-user-home'
 if ($Action -eq 'Install' -and [string]::IsNullOrWhiteSpace($DeviceSerial)) { throw 'Install requires -DeviceSerial for the intended phone.' }
 if ($DeviceSerial) { $env:ANDROID_SERIAL = $DeviceSerial }
 $env:PATH = $env:JAVA_HOME + '\bin;' + $env:PATH
-$gradleTask = if ($Action -eq 'Install') { ':app:installDefaultDebug' } else { ':app:assembleDefaultDebug' }
 Push-Location $PSScriptRoot
 try {
-    & .\gradlew.bat $gradleTask --console=plain --max-workers=4
+    & .\gradlew.bat :app:assembleDefaultDebug --console=plain --max-workers=4
     if ($LASTEXITCODE -ne 0) { throw "Gradle failed: $LASTEXITCODE" }
+    $apkDirectory = Join-Path $PSScriptRoot 'app\build\outputs\apk\default\debug'
+    $apkMetadata = Get-Content (Join-Path $apkDirectory 'output-metadata.json') -Raw | ConvertFrom-Json
+    if ($apkMetadata.elements.Count -ne 1 -or $apkMetadata.elements[0].filters[0].value -ne 'arm64-v8a') {
+        throw 'Expected one arm64 APK for the personal phone.'
+    }
+    $apkFile = Join-Path $apkDirectory $apkMetadata.elements[0].outputFile
+    & python (Join-Path $PSScriptRoot 'tools\check_native_alignment.py') $apkFile
+    if ($LASTEXITCODE -ne 0) { throw 'APK native libraries must pass 16KB ELF and ZIP alignment before installation.' }
     if ($Action -eq 'Install') {
+        & .\gradlew.bat :app:installDefaultDebug --console=plain --max-workers=4
+        if ($LASTEXITCODE -ne 0) { throw "Gradle installation failed: $LASTEXITCODE" }
         $adbPath = Join-Path $env:ANDROID_HOME 'platform-tools\adb.exe'
         $packageName = 'com.pyeonje.fadcam.beta'
         $mainPackages = & $adbPath -s $DeviceSerial shell pm list packages --user 0 $packageName

@@ -2,26 +2,29 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
     <item
         android:id="@+id/navigation_home"
-        android:icon="@drawable/pilot_steering_white"
-        android:title="@string/nav_home" />
+        android:icon="@drawable/ic_camera"
+        android:title="@string/personal_tab_record" />
     <item
         android:id="@+id/navigation_records"
         android:icon="@drawable/ic_records_selector"
-        android:title="@string/nav_records" />
+        android:title="@string/personal_tab_videos" />
     <item
         android:id="@+id/navigation_remote"
+        android:visible="false"
         android:icon="@drawable/unknown_icon0"
         android:title="@string/nav_remote" />
     <item
         android:id="@+id/navigation_faditor_mini"
+        android:visible="false"
         android:icon="@drawable/movie_edit_24px"
         android:title="@string/nav_faditor_mini" />
     <item
         android:id="@+id/navigation_settings"
         android:icon="@drawable/ic_nav_settings"
-        android:title="@string/nav_settings" />
+        android:title="@string/personal_settings_title" />
     <item
         android:id="@+id/navigation_lab"
+        android:visible="false"
         android:icon="@drawable/biotech_24px"
         android:title="@string/nav_lab" />
 </menu>

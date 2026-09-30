@@ -275,69 +275,10 @@ public class MainActivity extends AppCompatActivity {
      * Uses Material Design BadgeDrawable on BottomNavigationView items.
      */
     private void updateFeatureBadgeVisibility() {
-        try {
-            if (bottomNavigationView == null) {
-                return;
-            }
-            
-            // Handle Remote badge
-            boolean shouldShowRemoteBadge = NewFeatureManager.shouldShowBadge(this, "remote");
-            FLog.d("MainActivity", "updateFeatureBadgeVisibility: shouldShowRemoteBadge=" + shouldShowRemoteBadge);
-            
-            if (shouldShowRemoteBadge) {
-                // Show badge on Remote nav item
-                try {
-                    com.google.android.material.badge.BadgeDrawable badge = 
-                        bottomNavigationView.getOrCreateBadge(R.id.navigation_remote);
-                    badge.setVisible(true);
-                    badge.setText("NEW"); // Show "NEW" text instead of number
-                    badge.setBackgroundColor(0xFF4CAF50); // Green background
-                    badge.setBadgeTextColor(0xFFFFFFFF); // White text color
-                    FLog.d("MainActivity", "Badge shown for remote");
-                } catch (Exception e) {
-                    FLog.e("MainActivity", "Error creating badge", e);
-                }
-            } else {
-                // Remove badge from Remote nav item
-                try {
-                    bottomNavigationView.removeBadge(R.id.navigation_remote);
-                    FLog.d("MainActivity", "Badge removed for remote");
-                } catch (Exception e) {
-                    FLog.e("MainActivity", "Error removing badge", e);
-                }
-            }
-            
-            // Handle Settings Nav Badge (separate from watermark option inside settings)
-            boolean shouldShowSettingsNavBadge = NewFeatureManager.shouldShowBadge(this, "settings_nav");
-            FLog.d("MainActivity", "updateFeatureBadgeVisibility: shouldShowSettingsNavBadge=" + shouldShowSettingsNavBadge);
-            
-            if (shouldShowSettingsNavBadge) {
-                // Show badge on Settings nav item as a small dot (no text, no number)
-                try {
-                    com.google.android.material.badge.BadgeDrawable badge = 
-                        bottomNavigationView.getOrCreateBadge(R.id.navigation_settings);
-                    badge.setVisible(true);
-                    badge.clearNumber();
-                    badge.clearText();
-                    badge.setHorizontalPadding(0);
-                    badge.setVerticalPadding(0);
-                    badge.setBackgroundColor(0xFF4CAF50); // Green background
-                    FLog.d("MainActivity", "Badge shown for settings");
-                } catch (Exception e) {
-                    FLog.e("MainActivity", "Error creating settings badge", e);
-                }
-            } else {
-                // Remove badge from Settings nav item
-                try {
-                    bottomNavigationView.removeBadge(R.id.navigation_settings);
-                    FLog.d("MainActivity", "Badge removed for settings");
-                } catch (Exception e) {
-                    FLog.e("MainActivity", "Error removing settings badge", e);
-                }
-            }
-        } catch (Exception e) {
-            FLog.e("MainActivity", "Error updating badge visibility", e);
-        }
+        if (bottomNavigationView == null) return;
+        bottomNavigationView.removeBadge(R.id.navigation_remote);
+        bottomNavigationView.removeBadge(R.id.navigation_settings);
+        bottomNavigationView.removeBadge(R.id.navigation_lab);
     }
 
     /**
@@ -400,6 +341,7 @@ public class MainActivity extends AppCompatActivity {
         // Apply user-selected theme AFTER splash so postSplashScreenTheme replaced by
         // dynamic choice
         applyTheme();
+        setTheme(R.style.Theme_PersonalRecorder);
 
         // possible)-----------
         try {
@@ -427,47 +369,8 @@ public class MainActivity extends AppCompatActivity {
         // Initialize SharedPreferencesManager instance first
         this.sharedPreferencesManager = SharedPreferencesManager.getInstance(this);
 
-        // Check if this is a first launch by looking for a special flag
-        boolean firstInstallChecked = sharedPreferencesManager.sharedPreferences
-                .getBoolean(Constants.FIRST_INSTALL_CHECKED_KEY, false);
-
-        if (!firstInstallChecked) {
-            // This is definitely a first install or app data was cleared
-            // Force onboarding to show by setting the flag to false
-            FLog.d("MainActivity", "First install detected! Forcing onboarding to show.");
-            sharedPreferencesManager.sharedPreferences.edit()
-                    .putBoolean(Constants.COMPLETED_ONBOARDING_KEY, false)
-                    .putBoolean(Constants.FIRST_INSTALL_CHECKED_KEY, true)
-                    .commit(); // Use commit() for immediate effect
-        }
-
-        // Check for onboarding BEFORE applying theme or language
-        boolean completedOnboarding = sharedPreferencesManager.sharedPreferences.getBoolean(Constants.COMPLETED_ONBOARDING_KEY, false);
-        boolean showOnboarding = sharedPreferencesManager.isShowOnboarding();
-        FLog.d("MainActivity", "Should show onboarding: " + showOnboarding);
-
-        if (showOnboarding) {
-            // Check if onboarding was actually completed (user went through it)
-            if (!completedOnboarding) {
-                // User has NOT completed onboarding yet - show full onboarding first
-                Intent intent = new Intent(this, com.fadcam.ui.OnboardingActivity.class);
-                startActivity(intent);
-            } else {
-                // User HAS completed onboarding - show What's New screen instead
-                // Skip WhatsNewActivity on Wear OS: WebView is not supported
-                if (!RuntimeCompat.isWatchDevice(this)) {
-                    Intent intent = new Intent(this, com.fadcam.ui.WhatsNewActivity.class);
-                    startActivity(intent);
-                    finish();
-                    return;
-                }
-            }
-            finish(); // Finish this activity so it's not in the back stack
-            return;
-        }
-
-        // Now that we know we're not showing onboarding, continue with normal
-        // initialization
+        // Personal setup is handled by the permission control on the recording screen.
+        // Do not interrupt every launch with marketing/onboarding pages.
 
         // Load and apply the saved language preference before anything else
         SharedPreferences prefs = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE);
@@ -534,7 +437,7 @@ public class MainActivity extends AppCompatActivity {
             bottomNavigationView.setPadding(0, 0, 0, 0);
 
             // Active-tab label mode: only the selected tab shows its label.
-            bottomNavigationView.setLabelVisibilityMode(NavigationBarView.LABEL_VISIBILITY_SELECTED);
+            bottomNavigationView.setLabelVisibilityMode(NavigationBarView.LABEL_VISIBILITY_LABELED);
             bottomNavigationView.setItemActiveIndicatorEnabled(false);
             // Center content (icon + label) vertically within the 64dp dock.
             bottomNavigationView.setItemGravity(NavigationBarView.ITEM_GRAVITY_CENTER);
@@ -547,7 +450,7 @@ public class MainActivity extends AppCompatActivity {
             // elevation shadow both follow the rounded pill shape reliably across themes.
             // The background color is resolved from the XML attribute; we only set the shape.
             final float cornerPx = android.util.TypedValue.applyDimension(
-                    android.util.TypedValue.COMPLEX_UNIT_DIP, 24,
+                    android.util.TypedValue.COMPLEX_UNIT_DIP, 0,
                     getResources().getDisplayMetrics());
             bottomNavigationView.setOutlineProvider(new android.view.ViewOutlineProvider() {
                 @Override
@@ -635,6 +538,7 @@ public class MainActivity extends AppCompatActivity {
             // Configuration change / process death — FragmentManager restores all added fragments
             // We need to find which was the current one and ensure others are hidden
             int restoredPosition = savedInstanceState.getInt("current_fragment_position", 0);
+            if (restoredPosition != 0 && restoredPosition != 1 && restoredPosition != 4) restoredPosition = 0;
             androidx.fragment.app.FragmentManager fm = getSupportFragmentManager();
             
             // Hide all fragments except the current one, and restore currentFragmentPosition
@@ -651,7 +555,8 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
             }
-            currentFragmentPosition = restoredPosition;
+            currentFragmentPosition = -1;
+            switchFragment(restoredPosition, false);
             scheduleTabPrewarm();
         }
 
@@ -709,7 +614,7 @@ public class MainActivity extends AppCompatActivity {
 
         // The initial bar colors and transparency are now handled by switchFragment(0, false) 
         applyHomeNavIcon();
-        setupHomeIconCustomization();
+
         // or restored from saved state via restoreBarColorsForCurrentTab() inside handleTabSelected.
 
         // theme change)-----------
@@ -833,16 +738,9 @@ public class MainActivity extends AppCompatActivity {
                     boolean isRtl = getWindow().getDecorView().getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
                     boolean isSwipeBack = isRtl ? (dx < 0) : (dx > 0);
                     
-                    // Swipe "back" from home tab opens sidebar instead of navigating
-                    if (isSwipeBack && currentFragmentPosition == 0) {
-                        openHomeSidebarFromSwipe();
-                        swipeHandled = true;
-                        swipeCandidate = false;
-                        return true;
-                    }
                     // RTL-aware tab navigation: reverse direction in RTL layout
                     int direction = isRtl ? (dx > 0 ? 1 : -1) : (dx < 0 ? 1 : -1);
-                    int target = currentFragmentPosition + direction;
+                    int target = adjacentPersonalTab(currentFragmentPosition, direction);
                     if (target >= 0 && target <= 5) {
                         switchFragment(target, true);
                         swipeHandled = true;
@@ -1274,7 +1172,7 @@ public class MainActivity extends AppCompatActivity {
             }
             // Switch to next tab if not at end
             if (currentPos < 4) {
-                switchFragment(currentPos + 1, true);
+                switchFragment(adjacentPersonalTab(currentPos, 1), true);
                 return true;
             }
             return true;
@@ -1290,7 +1188,7 @@ public class MainActivity extends AppCompatActivity {
             }
             // Switch to previous tab if not at start
             if (currentPos > 0) {
-                switchFragment(currentPos - 1, true);
+                switchFragment(adjacentPersonalTab(currentPos, -1), true);
                 return true;
             }
             return true;
@@ -1356,7 +1254,7 @@ public class MainActivity extends AppCompatActivity {
      * preference is enabled. Falls back to disabled on any error.
      */
     private boolean isVolumeShutterActive() {
-        if (getCurrentFragmentPosition() != 0) return false;
+        if (getCurrentFragmentPosition() != 0 || !(getCurrentFragment() instanceof HomeFragment)) return false;
         try {
             if (sharedPreferencesManager == null) {
                 sharedPreferencesManager = SharedPreferencesManager.getInstance(this);
@@ -1822,17 +1720,9 @@ public class MainActivity extends AppCompatActivity {
      * Called from onResume to ensure colors are correct when returning from background.
      */
     private void restoreBarColorsForCurrentTab() {
-        if (currentFragmentPosition == 2) {
-            // Remote tab uses black bars
-            setBottomNavColor(0xFF000000);
-            setStatusBarColor(0xFF000000);
-            setNavigationBarColor(0xFF000000);
-        } else {
-            // All other tabs use theme default colors
-            setBottomNavColor(0);
-            setStatusBarColor(0);
-            setNavigationBarColor(0);
-        }
+        setBottomNavColor(0xFF171A1C);
+        setStatusBarColor(0xFF111315);
+        setNavigationBarColor(0xFF171A1C);
     }
 
     /**
@@ -1962,10 +1852,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String HOME_FRAGMENT_TAG_FADREC = FRAGMENT_TAG_PREFIX + "0_fadrec";
 
     private String getHomeFragmentTagForCurrentMode() {
-        String currentMode = sharedPreferencesManager.getCurrentRecordingMode();
-        return Constants.MODE_FADREC.equals(currentMode)
-                ? HOME_FRAGMENT_TAG_FADREC
-                : HOME_FRAGMENT_TAG_FADCAM;
+        return HOME_FRAGMENT_TAG_FADCAM;
     }
 
     private String getFragmentTagForPosition(int position) {
@@ -1997,24 +1884,8 @@ public class MainActivity extends AppCompatActivity {
      */
     private void applyHomeNavIcon() {
         if (bottomNavigationView == null) return;
-        try {
-            if (sharedPreferencesManager == null) {
-                sharedPreferencesManager = SharedPreferencesManager.getInstance(this);
-            }
-            String choice = sharedPreferencesManager.getHomeIcon();
-            int res;
-            if (Constants.HOME_ICON_JET.equals(choice)) {
-                res = R.drawable.fighter_jet_top_view;
-            } else if (Constants.HOME_ICON_PILOT.equals(choice)) {
-                res = R.drawable.pilot_steering_white;
-            } else {
-                res = R.drawable.ic_house;
-            }
-            android.view.MenuItem home = bottomNavigationView.getMenu().findItem(R.id.navigation_home);
-            if (home != null) home.setIcon(res);
-        } catch (Exception e) {
-            FLog.w("MainActivity", "applyHomeNavIcon failed: " + e.getMessage());
-        }
+        android.view.MenuItem home = bottomNavigationView.getMenu().findItem(R.id.navigation_home);
+        if (home != null) home.setIcon(R.drawable.ic_camera);
     }
 
     /**
@@ -2125,7 +1996,16 @@ public class MainActivity extends AppCompatActivity {
      * @param position Tab position (0-5)
      * @param animate Whether to animate the transition
      */
+    private int adjacentPersonalTab(int position, int direction) {
+        int[] tabs = {0, 1, 4};
+        for (int i = 0; i < tabs.length; i++) {
+            if (tabs[i] == position) return tabs[Math.max(0, Math.min(tabs.length - 1, i + direction))];
+        }
+        return 0;
+    }
+
     public void switchFragment(int position, boolean animate) {
+        if (position != 0 && position != 1 && position != 4) return;
         if (position == currentFragmentPosition) {
             return; // Already showing this fragment
         }
@@ -2153,6 +2033,11 @@ public class MainActivity extends AppCompatActivity {
         String targetTag = getFragmentTagForPosition(position);
         Fragment targetFragment = fm.findFragmentByTag(targetTag);
         
+        if (targetFragment != null && ((position == 0 && !(targetFragment instanceof com.fadcam.ui.PersonalHomeFragment))
+                || (position == 4 && !(targetFragment instanceof com.fadcam.ui.PersonalSettingsFragment)))) {
+            transaction.remove(targetFragment);
+            targetFragment = null;
+        }
         if (targetFragment != null) {
             // Fragment already added — just show it (instant, no view inflation)
             transaction.show(targetFragment);
@@ -2185,12 +2070,7 @@ public class MainActivity extends AppCompatActivity {
         switch (position) {
             case 0:
                 // Home tab - check current mode
-                String currentMode = sharedPreferencesManager.getCurrentRecordingMode();
-                if (com.fadcam.Constants.MODE_FADREC.equals(currentMode)) {
-                    newFragment = com.fadcam.fadrec.ui.FadRecHomeFragment.newInstance();
-                } else {
-                    newFragment = new com.fadcam.ui.HomeFragment();
-                }
+                newFragment = new com.fadcam.ui.PersonalHomeFragment();
                 break;
             case 1:
                 newFragment = new RecordsFragment();
@@ -2202,13 +2082,13 @@ public class MainActivity extends AppCompatActivity {
                 newFragment = new FaditorMiniFragment();
                 break;
             case 4:
-                newFragment = new com.fadcam.ui.SettingsHomeFragment();
+                newFragment = new com.fadcam.ui.PersonalSettingsFragment();
                 break;
             case 5:
                 newFragment = new com.fadcam.forensics.ui.ForensicIntelligenceFragment();
                 break;
             default:
-                newFragment = new com.fadcam.ui.HomeFragment();
+                newFragment = new com.fadcam.ui.PersonalHomeFragment();
         }
         
         return newFragment;

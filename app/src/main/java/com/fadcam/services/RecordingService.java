@@ -213,7 +213,6 @@ public class RecordingService extends Service {
     private long lastMotionAnalysisTimestampMs = 0L;
     private volatile com.fadcam.motion.domain.detector.MotionDetector motionDetector =
             new com.fadcam.motion.domain.detector.FrameDiffMotionDetector();
-    private volatile com.fadcam.motion.domain.detector.EfficientDetLite1Detector efficientDetDetector;
     private com.fadcam.motion.domain.policy.MotionPolicy motionPolicy =
             new com.fadcam.motion.domain.policy.MotionPolicy();
     private com.fadcam.motion.domain.state.MotionStateMachine motionStateMachine;
@@ -431,21 +430,6 @@ public class RecordingService extends Service {
             FLog.i(TAG, "Motion detector warmup started off the recording hot path");
 
             try {
-                if (efficientDetDetector == null) {
-                    try {
-                        com.fadcam.motion.domain.detector.EfficientDetLite1Detector detector =
-                                new com.fadcam.motion.domain.detector.EfficientDetLite1Detector(getApplicationContext());
-                        if (detector.isAvailable()) {
-                            efficientDetDetector = detector;
-                            FLog.i(TAG, "EfficientDet detector available: true");
-                        } else {
-                            FLog.w(TAG, "EfficientDet detector warmup completed but detector is unavailable");
-                        }
-                    } catch (Throwable t) {
-                        FLog.w(TAG, "EfficientDet warmup failed; continuing without AI detector", t);
-                    }
-                }
-
                 if (!motionOpenCvActive) {
                     try {
                         motionDetector = new com.fadcam.motion.domain.detector.OpenCvMog2MotionDetector();
@@ -461,7 +445,7 @@ public class RecordingService extends Service {
                 motionDetectorWarmupCompleted = true;
                 long elapsedMs = SystemClock.elapsedRealtime() - startMs;
                 FLog.i(TAG, "Motion detector warmup finished in " + elapsedMs
-                        + " ms, aiReady=" + (efficientDetDetector != null)
+                        + " ms"
                         + ", openCv=" + motionOpenCvActive);
             }
         });
@@ -2327,8 +2311,7 @@ public class RecordingService extends Service {
             FLog.i(TAG, "MotionLab summary: frames=" + motionFramesAnalyzed
                     + ", actions=" + motionTriggerActionCount
                     + ", suppressed=" + motionSuppressedSignalCount
-                    + ", safeMode=" + motionSafeMode
-                    + ", detectorAvailable=" + (efficientDetDetector != null && efficientDetDetector.isAvailable()));
+                    + ", safeMode=" + motionSafeMode);
         }
         if (digitalForensicsEventRecorder != null) {
             long timelineMs = getEffectiveTimelineMs();
@@ -3005,7 +2988,9 @@ public class RecordingService extends Service {
     }
 
     private void configureMotionLabForSession() {
-        motionLabEnabledForSession = sharedPreferencesManager != null && sharedPreferencesManager.isMotionModeEnabled();
+        // This personal app records continuously when the user starts it.
+        // Ignore saved upstream motion settings; optional AI is not packaged.
+        motionLabEnabledForSession = false;
         lastMotionAnalysisTimestampMs = 0L;
         motionAutoPaused = false;
         motionSafeMode = RuntimeCompat.shouldUseSafeMotionAnalysis(getApplicationContext());
@@ -3080,7 +3065,7 @@ public class RecordingService extends Service {
             Size selected = sharedPreferencesManager != null
                     ? sharedPreferencesManager.getCameraResolution()
                     : Constants.DEFAULT_VIDEO_RESOLUTION;
-            // Scale divisor with recording resolution: MOG2 and EfficientDet both work
+            // Scale divisor with recording resolution: MOG2 works
             // fine at lower resolutions, but the camera ISP has to produce YUV frames
             // for the analysis surface, which can starve the encoder at high res+fps.
             int recordingHeight = selected.getHeight();
@@ -3120,8 +3105,8 @@ public class RecordingService extends Service {
                         }
                         lastMotionAnalysisTimestampMs = now;
                         float rawMotionScore = motionDetector.detectScore(image);
-                        com.fadcam.motion.domain.detector.EfficientDetLite1Detector.FramePacket framePacket =
-                                com.fadcam.motion.domain.detector.EfficientDetLite1Detector.FramePacket.copyFrom(image);
+                        com.fadcam.motion.domain.detector.MotionAnalysisData.FramePacket framePacket =
+                                com.fadcam.motion.domain.detector.MotionAnalysisData.FramePacket.copyFrom(image);
                         image.close();
                         image = null;
                         processMotionFrame(rawMotionScore, framePacket, now);
@@ -3145,7 +3130,7 @@ public class RecordingService extends Service {
 
     private void processMotionFrame(
             float rawMotionScore,
-            @Nullable com.fadcam.motion.domain.detector.EfficientDetLite1Detector.FramePacket framePacket,
+            @Nullable com.fadcam.motion.domain.detector.MotionAnalysisData.FramePacket framePacket,
             long nowMs
     ) {
         motionFramesAnalyzed++;
@@ -3163,14 +3148,11 @@ public class RecordingService extends Service {
             motionScoreEma = (alpha * rawMotionScore) + ((1f - alpha) * motionScoreEma);
         }
         float motionScore = motionScoreEma;
-        List<com.fadcam.motion.domain.detector.EfficientDetLite1Detector.DetectionResult> detections =
-                (efficientDetDetector != null && framePacket != null)
-                        ? efficientDetDetector.detect(framePacket)
-                        : java.util.Collections.emptyList();
-        com.fadcam.motion.domain.detector.EfficientDetLite1Detector.DetectionResult primaryDetection =
-                efficientDetDetector != null ? efficientDetDetector.choosePrimary(detections) : null;
-        float personConfidence = efficientDetDetector != null ? efficientDetDetector.bestPersonConfidence(detections) : 0f;
-        boolean personDetectedRaw = efficientDetDetector != null && efficientDetDetector.hasPerson(detections);
+        List<com.fadcam.motion.domain.detector.MotionAnalysisData.DetectionResult> detections =
+                java.util.Collections.emptyList();
+        com.fadcam.motion.domain.detector.MotionAnalysisData.DetectionResult primaryDetection = null;
+        float personConfidence = 0f;
+        boolean personDetectedRaw = false;
         if (personDetectedRaw) {
             motionConsecutivePersonHits++;
         } else {
@@ -3554,14 +3536,14 @@ public class RecordingService extends Service {
 
     @Nullable
     private String buildOverlayPayloadFromDetections(
-            @Nullable List<com.fadcam.motion.domain.detector.EfficientDetLite1Detector.DetectionResult> detections
+            @Nullable List<com.fadcam.motion.domain.detector.MotionAnalysisData.DetectionResult> detections
     ) {
         if (detections == null || detections.isEmpty()) {
             return null;
         }
         StringBuilder out = new StringBuilder();
         int emitted = 0;
-        for (com.fadcam.motion.domain.detector.EfficientDetLite1Detector.DetectionResult detection : detections) {
+        for (com.fadcam.motion.domain.detector.MotionAnalysisData.DetectionResult detection : detections) {
             if (detection == null || detection.confidence < 0.45f) {
                 continue;
             }
@@ -3746,7 +3728,7 @@ public class RecordingService extends Service {
 
     @Nullable
     private byte[] buildMotionDebugFrameJpeg(
-            @Nullable com.fadcam.motion.domain.detector.EfficientDetLite1Detector.FramePacket framePacket
+            @Nullable com.fadcam.motion.domain.detector.MotionAnalysisData.FramePacket framePacket
     ) {
         if (framePacket == null) {
             return null;
@@ -3853,7 +3835,7 @@ public class RecordingService extends Service {
 
     @Nullable
     private byte[] framePacketToNv21(
-            @NonNull com.fadcam.motion.domain.detector.EfficientDetLite1Detector.FramePacket framePacket
+            @NonNull com.fadcam.motion.domain.detector.MotionAnalysisData.FramePacket framePacket
     ) {
         int width = framePacket.width;
         int height = framePacket.height;
@@ -5382,6 +5364,7 @@ public class RecordingService extends Service {
     // --- Broadcasts ---
     private void broadcastOnRecordingStarted() {
         Intent broadcastIntent = new Intent(Constants.BROADCAST_ON_RECORDING_STARTED);
+        broadcastIntent.setPackage(getPackageName());
         broadcastIntent.putExtra(Constants.INTENT_EXTRA_RECORDING_START_TIME, recordingStartTime);
         broadcastIntent.putExtra(Constants.INTENT_EXTRA_RECORDING_STATE, recordingState);
         broadcastIntent.putExtra(Constants.INTENT_EXTRA_RECORDING_PAUSE_STARTED_AT, pauseStartedAt);
@@ -5417,6 +5400,7 @@ public class RecordingService extends Service {
         // it works for widgets, tiles, shortcuts and background stops too.
         com.fadcam.Utils.vibrateRecordingStop(this);
         Intent broadcastIntent = new Intent(Constants.BROADCAST_ON_RECORDING_STOPPED);
+        broadcastIntent.setPackage(getPackageName());
         sendBroadcast(broadcastIntent);
         // QS tile: flip back to INACTIVE instantly (see broadcastOnRecordingStarted).
         com.fadcam.services.RecordingTileService.requestTileRefresh(this);
@@ -5424,6 +5408,7 @@ public class RecordingService extends Service {
 
     private void broadcastOnPreviewOnlyStarted() {
         Intent broadcastIntent = new Intent(Constants.BROADCAST_ON_PREVIEW_ONLY_STARTED);
+        broadcastIntent.setPackage(getPackageName());
         broadcastIntent.putExtra(Constants.EXTRA_PREVIEW_ONLY_ACTIVE, true);
         sendBroadcast(broadcastIntent);
         FLog.d(TAG, "Broadcasted: BROADCAST_ON_PREVIEW_ONLY_STARTED");
@@ -5431,6 +5416,7 @@ public class RecordingService extends Service {
 
     private void broadcastOnPreviewOnlyStopped() {
         Intent broadcastIntent = new Intent(Constants.BROADCAST_ON_PREVIEW_ONLY_STOPPED);
+        broadcastIntent.setPackage(getPackageName());
         broadcastIntent.putExtra(Constants.EXTRA_PREVIEW_ONLY_ACTIVE, false);
         sendBroadcast(broadcastIntent);
         FLog.d(TAG, "Broadcasted: BROADCAST_ON_PREVIEW_ONLY_STOPPED");
@@ -5438,6 +5424,8 @@ public class RecordingService extends Service {
 
     private void broadcastOnRecordingStateCallback() {
         Intent broadcastIntent = new Intent(Constants.BROADCAST_ON_RECORDING_STATE_CALLBACK);
+        // Internal UI receivers are deliberately not exported. Target this installed package.
+        broadcastIntent.setPackage(getPackageName());
         broadcastIntent.putExtra(Constants.INTENT_EXTRA_RECORDING_STATE, recordingState);
         broadcastIntent.putExtra(Constants.EXTRA_PREVIEW_ONLY_ACTIVE, previewOnlyActive);
         // Include start time so late joiners (e.g., fragment after orientation change) can restore elapsed timer
@@ -7378,6 +7366,7 @@ public class RecordingService extends Service {
             String stackTrace = sw.toString();
 
             Intent failureIntent = new Intent(Constants.ACTION_RECORDING_FAILED);
+            failureIntent.setPackage(getPackageName());
             failureIntent.putExtra(Constants.EXTRA_ERROR_MESSAGE, e.getMessage());
             failureIntent.putExtra(Constants.EXTRA_STACK_TRACE, stackTrace);
             try {

@@ -2,8 +2,5 @@
 <!-- Rounded bottom corners background for header bars to match dock design -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="?attr/colorTopBar" />
-    <corners
-        android:bottomLeftRadius="24dp"
-        android:bottomRightRadius="24dp" />
+    <solid android:color="#111315" />
 </shape>

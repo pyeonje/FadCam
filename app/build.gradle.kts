@@ -13,21 +13,14 @@ android {
     compileSdk = 36
 
     val isBundle = gradle.startParameter.taskNames.any { it.lowercase().contains("bundle") }
-    val isProBuild = gradle.startParameter.taskNames.any { it.lowercase().contains("pro") }
 
     splits {
         abi {
-            // For pro builds: enable splits but only arm64-v8a (no universal)
-            // For main builds: arm64-v8a + armeabi-v7a with universal APK
+            // This personal fork targets the owner's arm64 SM-S928N only.
             isEnable = !isBundle
             reset()
-            if (isProBuild) {
-                include("arm64-v8a")
-                isUniversalApk = false
-            } else {
-                include("armeabi-v7a", "arm64-v8a")
-                isUniversalApk = true
-            }
+            include("arm64-v8a")
+            isUniversalApk = false
         }
     }
 
@@ -40,9 +33,11 @@ android {
         versionName = "4.0.0"
         vectorDrawables.useSupportLibrary = true
         
-        // Fix 16KB native library alignment for Android 15
         // Generate full native debug symbols so they can be uploaded to Play Console
         ndk {
+            if (isBundle) {
+                abiFilters += "arm64-v8a"
+            }
             debugSymbolLevel = "FULL"
         }
     }
@@ -303,10 +298,9 @@ dependencies {
     implementation(libs.navigation.fragment.ktx)
     implementation(libs.navigation.ui.ktx)
     implementation(libs.okhttp)
-    implementation(libs.tensorflow.lite)
-    implementation(libs.tensorflow.lite.task.vision) {
-        exclude(group = "org.tensorflow", module = "tensorflow-lite-api")
-    }
+    // Optional AI detection is omitted from the personal recording app.
+    // Task Vision 0.4.4 ships libtask_vision_jni.so with 4KB ELF PT_LOAD alignment.
+    // ZIP alignment alone cannot repair that native binary.
     implementation(libs.opencv.android)
     implementation(libs.osmdroid.android)
     implementation(libs.osmdroid.wms)

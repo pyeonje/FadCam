@@ -45,7 +45,7 @@ public class ShortcutsSettingsFragment extends Fragment {
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container,
             @Nullable Bundle savedInstanceState) {
-        return inflater.inflate(R.layout.fragment_settings_shortcuts, container, false);
+        return inflater.inflate(R.layout.fragment_personal_shortcuts, container, false);
     }
 
     @Override
@@ -61,7 +61,7 @@ public class ShortcutsSettingsFragment extends Fragment {
 
         TextView helper = view.findViewById(R.id.shortcuts_helper);
         if (helper != null) {
-            helper.setText(getString(R.string.shortcuts_helper_text));
+            helper.setText(getString(R.string.personal_shortcuts_hint));
         }
         // Ensure dynamic shortcuts reflect current customization when opening screen
         try {
