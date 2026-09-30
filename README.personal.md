@@ -58,4 +58,3 @@ Local validation: all11 JUnit/Robolectric tests passed (4 haptic lifecycle, 4 li
 
 
 Final installation completed on SM-S928N / Android16 with Gradle. User0 only, no secondary profile package; POST_NOTIFICATIONS verified granted=false in the user0 block. No device recording, screen control, or haptic test was performed during this update.
-
