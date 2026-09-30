@@ -5,6 +5,10 @@ plugins {
 }
 
 android {
+    // Install only for the main phone profile, never Samsung Dual Messenger.
+    installation {
+        installOptions("--user", "0")
+    }
     namespace = "com.fadcam"
     compileSdk = 36
 

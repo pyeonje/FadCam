@@ -13,6 +13,8 @@ Upstream shortcut customization remains available: rename an action, choose an i
 
 `build-personal.ps1 -Action Build` builds the default debug variant. `build-personal.ps1 -Action Install -DeviceSerial <ADB_SERIAL>` installs through Gradle. The script uses the local Android toolchain prepared for this fork.
 
+Gradle installation is restricted to the main phone profile (`--user 0`). Do not install into Samsung's Dual Messenger / `DUAL_APP` profile. The unintended initial copy in user 95 was removed; both launcher entries belong to the single app in the main profile.
+
 `local.properties` (ignored) supplies the SDK directory and the sibling `FadCam-media3-patched` checkout. The required source revision is recorded in `personal-build.lock.json`. The modified Media3 build is essential to preserve FadCam's hybrid MP4 finalization behavior; do not silently replace it with unmodified Maven Media3.
 
 Installation does not grant runtime permissions or start a recording. Recording reliability and the applied video settings must be checked in an intentional later recording session.

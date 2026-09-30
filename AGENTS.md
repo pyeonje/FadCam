@@ -6,6 +6,7 @@
 - Setup launcher: `com.pyeonje.fadcam.beta/com.fadcam.SplashActivity`.
 - Saved-settings recording launcher: `com.pyeonje.fadcam.beta/com.fadcam.PersonalRecordingStartActivity`.
 - Install with `:app:installDefaultDebug`, selecting the intended phone with `ANDROID_SERIAL`. `build-personal.ps1` provides the workstation's toolchain configuration.
+- All phone installations must target the main user only (`--user 0`). The user explicitly rejected installing a duplicate in Samsung's `DUAL_APP` profile (user 95). Keep the Gradle `installation.installOptions("--user", "0")` restriction and verify profile installation state after each install. Preserve the setup and recording launcher entries in the main profile.
 - Initial fork installation was verified without launching the app or recording. Start a recording only when the current task authorizes a recording session; installation-only verification checks the package and launcher registration.
 - Use the patched Media3 revision in `personal-build.lock.json`; local SDK and patched checkout paths belong in ignored `local.properties`.
 
