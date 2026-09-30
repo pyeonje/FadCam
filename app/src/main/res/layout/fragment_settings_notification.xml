@@ -57,6 +57,44 @@ app:layout_constraintTop_toTopOf="parent"
             android:paddingEnd="16dp"
             android:paddingTop="16dp">
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="@drawable/settings_group_card_bg"
+                android:padding="16dp"
+                android:layout_marginBottom="20dp">
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/personal_notification_visibility"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:textColor="?attr/colorHeading" />
+                <TextView
+                    android:id="@+id/personal_notification_visibility_value"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textColor="#65D7A0"
+                    android:textSize="15sp" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/personal_notification_visibility_hint"
+                    android:textColor="#9DB5A7"
+                    android:textSize="13sp" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/personal_notification_system_settings"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/personal_notification_system_settings"
+                    android:textColor="#65D7A0" />
+            </LinearLayout>
+
             <!-- Preview Title (outside card) -->
             <TextView
                 android:layout_width="wrap_content"

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="personal_notification_visibility">알림 목록 표시</string>
+    <string name="personal_notification_shown">켜짐</string>
+    <string name="personal_notification_hidden">꺼짐</string>
+    <string name="personal_notification_visibility_hint">알림을 꺼도 촬영은 계속됩니다. 시작·정지는 메인앱 또는 바로촬영 버튼으로 할 수 있습니다. 실행 중인 앱과 카메라·마이크 사용 표시는 안드로이드가 관리합니다.</string>
+    <string name="personal_notification_system_settings">시스템 알림 설정</string>
+</resources>

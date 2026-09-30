@@ -20,6 +20,7 @@ import java.util.List;
  * Applies customization to ShortcutInfoCompat before pinning/requesting dynamic shortcuts.
  */
 public class ShortcutsManager {
+    public static final String ID_PERSONAL_MAIN = "personal_main";
 
     public static final String ID_TORCH = "torch_toggle";
     public static final String ID_TOGGLE = "record_toggle";
@@ -63,6 +64,11 @@ public class ShortcutsManager {
         IconCompat icon = resolveIcon(id, defaultIcon);
         if (icon != null) b.setIcon(icon);
         b.setIntent(intent);
+        if (ID_PERSONAL_MAIN.equals(id)) {
+            b.setActivity(new android.content.ComponentName(ctx, com.fadcam.SplashActivity.class));
+        } else if (ID_TOGGLE.equals(id)) {
+            b.setActivity(new android.content.ComponentName(ctx, com.fadcam.PersonalRecordingStartActivity.class));
+        }
         return b.build();
     }
 
@@ -92,7 +98,35 @@ public class ShortcutsManager {
         IconCompat icon = resolveIcon(id, defaultIcon);
         if (icon != null) b.setIcon(icon);
         b.setIntent(intent);
+        if (ID_PERSONAL_MAIN.equals(id)) {
+            b.setActivity(new android.content.ComponentName(ctx, com.fadcam.SplashActivity.class));
+        } else if (ID_TOGGLE.equals(id)) {
+            b.setActivity(new android.content.ComponentName(ctx, com.fadcam.PersonalRecordingStartActivity.class));
+        }
         return b.build();
+    }
+
+    /** Updates every mutable home icon belonging to this shortcut, including older pin IDs. */
+    public boolean updateExistingPinned(@NonNull String id, @NonNull Intent intent,
+            @DrawableRes int defaultIcon, @NonNull CharSequence defaultLabel) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.N_MR1) return false;
+        android.content.pm.ShortcutManager manager = ctx.getSystemService(android.content.pm.ShortcutManager.class);
+        if (manager == null) return false;
+        List<ShortcutInfoCompat> updates = new ArrayList<>();
+        for (android.content.pm.ShortcutInfo existing : manager.getPinnedShortcuts()) {
+            String pinnedId = existing.getId();
+            boolean matches = pinnedId.equals(id) || pinnedId.equals(id + "_pin")
+                    || pinnedId.equals(id + "_pin_custom") || pinnedId.equals(id + "_custom");
+            if (!matches || existing.isImmutable()) continue;
+            ShortcutInfoCompat.Builder builder = new ShortcutInfoCompat.Builder(ctx, pinnedId);
+            String customLabel = prefs.getCustomLabel(id);
+            builder.setShortLabel(customLabel != null ? customLabel : defaultLabel)
+                    .setLongLabel(customLabel != null ? customLabel : defaultLabel)
+                    .setIntent(intent).setIcon(resolveIcon(id, defaultIcon));
+            if (existing.getActivity() != null) builder.setActivity(existing.getActivity());
+            updates.add(builder.build());
+        }
+        return !updates.isEmpty() && ShortcutManagerCompat.updateShortcuts(ctx, updates);
     }
 
     @Nullable
@@ -195,7 +229,7 @@ public class ShortcutsManager {
                 ID_TOGGLE,
                 new Intent(Intent.ACTION_VIEW).setClassName(
                     ctx,
-                    "com.fadcam.RecordingToggleActivity"
+                    "com.fadcam.PersonalRecordingStartActivity"
                 ),
                 com.fadcam.R.drawable.personal_calendar_quick,
                 ctx.getString(com.fadcam.R.string.shortcut_toggle_recording),
@@ -362,7 +396,7 @@ public class ShortcutsManager {
                         ID_TOGGLE,
                         new Intent(Intent.ACTION_VIEW).setClassName(
                             ctx,
-                            "com.fadcam.RecordingToggleActivity"
+                            "com.fadcam.PersonalRecordingStartActivity"
                         ),
                         com.fadcam.R.drawable.personal_calendar_quick,
                         ctx.getString(

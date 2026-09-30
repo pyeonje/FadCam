@@ -91,11 +91,29 @@ public class ShortcutsPreferences {
      */
     @Nullable
     public String setCustomIconFromUri(@NonNull String shortcutId, @NonNull Uri imageUri) {
+        android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        try (InputStream bounds = ctx.getContentResolver().openInputStream(imageUri)) {
+            if (bounds == null) return null;
+            android.graphics.BitmapFactory.decodeStream(bounds, null, options);
+        } catch (Exception e) {
+            return null;
+        }
+        if (options.outWidth <= 0 || options.outHeight <= 0) return null;
+        options.inSampleSize = 1;
+        while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > 1024) {
+            options.inSampleSize *= 2;
+        }
+        options.inJustDecodeBounds = false;
         try (InputStream is = ctx.getContentResolver().openInputStream(imageUri)) {
             if (is == null) return null;
-            android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeStream(is);
+            android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeStream(is, null, options);
             if (bmp == null) return null;
-            return setCustomIconFromBitmap(shortcutId, bmp);
+            try {
+                return setCustomIconFromBitmap(shortcutId, bmp);
+            } finally {
+                bmp.recycle();
+            }
         } catch (Exception e) {
             return null;
         }

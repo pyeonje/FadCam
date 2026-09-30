@@ -82,6 +82,25 @@ import java.util.Collections;
  * </ul>
  */
 public class DualCameraRecordingService extends Service {
+    private static volatile DualCameraRecordingService liveInstance;
+    private final com.fadcam.utils.RecordingHaptics recordingHaptics = new com.fadcam.utils.RecordingHaptics();
+
+    /** Includes accepted startup and pause, so every launcher controls the same session. */
+    public static boolean hasActiveSession() {
+        return getSessionState() != com.fadcam.RecordingState.NONE;
+    }
+
+    public static com.fadcam.RecordingState getSessionState() {
+        DualCameraRecordingService service = liveInstance;
+        if (service == null || service.isStopping) return com.fadcam.RecordingState.NONE;
+        switch (service.state) {
+            case INITIALIZING:
+            case PREVIEW_ONLY: return com.fadcam.RecordingState.STARTING;
+            case RECORDING: return com.fadcam.RecordingState.IN_PROGRESS;
+            case PAUSED: return com.fadcam.RecordingState.PAUSED;
+            default: return com.fadcam.RecordingState.NONE;
+        }
+    }
 
     private static final String TAG = "DualCamService";
 
@@ -173,6 +192,7 @@ public class DualCameraRecordingService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        liveInstance = this;
         FLog.d(TAG, "onCreate");
 
         prefs = SharedPreferencesManager.getInstance(getApplicationContext());
@@ -271,6 +291,7 @@ public class DualCameraRecordingService extends Service {
     @Override
     public void onDestroy() {
         FLog.d(TAG, "onDestroy");
+        if (liveInstance == this) liveInstance = null;
         releaseDurationLimitController();
         releaseAllResources();
         stopBackgroundThread();
@@ -366,6 +387,7 @@ public class DualCameraRecordingService extends Service {
 
         // ── Load config ───────────────────────────────────────────────
         config = prefs.getDualCameraConfig();
+        recordingHaptics.beginSession();
         state = DualCameraState.INITIALIZING;
         isStopping = false;
         camerasOpened = 0;
@@ -396,9 +418,7 @@ public class DualCameraRecordingService extends Service {
         FLog.i(TAG, "Stopping dual camera recording");
         isStopping = true;
         state = DualCameraState.DISABLED;
-        // Tactile confirmation that dual recording stopped (service-side,
-        // gated by the Haptic feedback setting).
-        com.fadcam.Utils.vibrateRecordingStop(this);
+        recordingHaptics.onRecordingStopped(this);
         fallbackMode = false;
         useBlackFrameFallback = false;
         isCapturingSnapshot = false;
@@ -1456,9 +1476,7 @@ public class DualCameraRecordingService extends Service {
             state = DualCameraState.RECORDING;
             recordingStartTime = SystemClock.elapsedRealtime();
             prefs.setRecordingInProgress(true);
-            // Tactile confirmation that dual recording started (service-side,
-            // gated by the Haptic feedback setting).
-            com.fadcam.Utils.vibrateRecordingStart(this);
+            recordingHaptics.onRecordingStarted(this);
 
             // Save start time for timer recovery
             getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
@@ -1551,6 +1569,7 @@ public class DualCameraRecordingService extends Service {
 
     /** Release everything in case of crash/destroy. */
     private void releaseAllResources() {
+        recordingHaptics.onRecordingStopped(this);
         if (durationLimitController != null) {
             durationLimitController.stopSession();
         }

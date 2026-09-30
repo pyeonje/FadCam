@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="personal_appearance_title">앱 이름·아이콘</string>
+    <string name="personal_appearance_settings_hint">홈 화면에서 사용할 이름과 이미지 변경</string>
+    <string name="personal_appearance_back">닫기</string>
+    <string name="personal_appearance_hint">이름과 이미지를 정해 홈 화면에 적용하세요. 처음 적용하면 사용자 지정 바로가기가 추가됩니다. 기존 기본 앱 아이콘의 이름은 바뀌지 않으므로 새 바로가기를 사용하고, 필요하면 기존 아이콘을 홈 화면에서 직접 제거하세요.</string>
+    <string name="personal_appearance_main">메인 앱</string>
+    <string name="personal_appearance_main_hint">촬영 화면, 영상 목록, 설정을 엽니다.</string>
+    <string name="personal_appearance_quick">바로촬영/중지</string>
+    <string name="personal_appearance_quick_hint">저장한 설정으로 촬영하고, 다시 누르면 정지합니다.</string>
+    <string name="personal_appearance_drawer_limit">앱 목록의 이름·아이콘은 기본 디자인을 유지합니다.</string>
+    <string name="personal_appearance_other_shortcuts">개별 촬영 시작·정지 바로가기</string>
+    <string name="personal_appearance_preview">홈 화면 아이콘 미리보기</string>
+    <string name="personal_appearance_name">이름</string>
+    <string name="personal_appearance_choose_image">갤러리에서 이미지 선택</string>
+    <string name="personal_appearance_default_icon">기본 아이콘</string>
+    <string name="personal_appearance_reset">초기화</string>
+    <string name="personal_appearance_apply">홈 화면에 적용/추가</string>
+    <string name="personal_appearance_updated">기존 홈 화면 아이콘에 변경사항을 적용했습니다.</string>
+    <string name="personal_appearance_pin_requested">홈 화면 추가 창에서 추가를 눌러 주세요.</string>
+    <string name="personal_appearance_pin_unsupported">현재 홈 화면 앱은 앱에서 바로가기 추가를 지원하지 않습니다.</string>
+    <string name="personal_appearance_apply_failed">홈 화면 아이콘을 적용할 수 없습니다. 다시 시도하세요.</string>
+    <string name="personal_appearance_image_failed">이미지를 불러올 수 없습니다. 다른 이미지를 선택하세요.</string>
+</resources>

@@ -1,7 +1,8 @@
 param(
     [ValidateSet('Build', 'Install')]
     [string]$Action = 'Build',
-    [string]$DeviceSerial = ''
+    [string]$DeviceSerial = '',
+    [switch]$HideNotifications
 )
 $ErrorActionPreference = 'Stop'
 $env:JAVA_HOME = 'C:\Users\vuswn\Documents\Codex\.tools\android\jdk-17.0.20.1+1'
@@ -44,6 +45,23 @@ try {
             }
         }
         Write-Output 'Verified: personal app is installed only in the main phone profile (user 0).'
+        if ($HideNotifications) {
+            $apiLevel = & $adbPath -s $DeviceSerial shell getprop ro.build.version.sdk
+            if ($LASTEXITCODE -ne 0 -or [int]$apiLevel -lt 33) {
+                throw 'Hiding notifications through runtime permission requires Android 13 or newer.'
+            }
+            & $adbPath -s $DeviceSerial shell pm revoke --user 0 $packageName android.permission.POST_NOTIFICATIONS
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to disable notification drawer permission.' }
+            & $adbPath -s $DeviceSerial shell pm set-permission-flags --user 0 $packageName android.permission.POST_NOTIFICATIONS user-set
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to persist the requested notification preference.' }
+            $packageDetails = & $adbPath -s $DeviceSerial shell dumpsys package $packageName
+            $mainProfileDetails = [regex]::Match(($packageDetails -join "`n"),
+                    '(?ms)^\s*User 0:.*?(?=^\s*User \d+:|\z)').Value
+            if ($LASTEXITCODE -ne 0 -or $mainProfileDetails -notmatch 'android.permission.POST_NOTIFICATIONS: granted=false') {
+                throw 'Notification drawer permission was not disabled.'
+            }
+            Write-Output 'Verified: main-profile notification permission disabled; foreground service registration is preserved.'
+        }
     }
 } finally {
     Pop-Location

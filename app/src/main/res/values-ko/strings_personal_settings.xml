@@ -12,7 +12,7 @@
     <string name="personal_settings_shortcut">촬영 아이콘 꾸미기</string>
     <string name="personal_settings_shortcut_hint">이름과 이미지 변경 · 홈 화면에 추가</string>
     <string name="personal_settings_notification">알림</string>
-    <string name="personal_settings_notification_hint">촬영 상태 및 알림 버튼</string>
+    <string name="personal_settings_notification_hint">알림 목록 표시 및 알림 버튼</string>
     <string name="personal_settings_automation">예약 촬영</string>
     <string name="personal_settings_automation_hint">촬영 시작 및 종료 시간 예약</string>
     <string name="personal_settings_watermark">날짜 및 워터마크</string>

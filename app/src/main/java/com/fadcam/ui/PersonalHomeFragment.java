@@ -8,7 +8,6 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -109,8 +108,7 @@ public class PersonalHomeFragment extends Fragment {
             FLog.d(TAG, "Received recording event: " + action);
             if (Constants.BROADCAST_ON_RECORDING_STATE_CALLBACK.equals(action)) {
                 // An idle single-camera service must not overwrite an active dual session.
-                if (ServiceUtils.isServiceRunning(context, DualCameraRecordingService.class)
-                        && prefs.isRecordingInProgress()) return;
+                if (DualCameraRecordingService.hasActiveSession()) return;
                 RecordingState reported = Utils.getSerializableExtraCompat(intent,
                         Constants.INTENT_EXTRA_RECORDING_STATE, RecordingState.class);
                 if (reported == null) {
@@ -166,7 +164,7 @@ public class PersonalHomeFragment extends Fragment {
         view.findViewById(R.id.personal_home_shortcuts).setOnClickListener(v -> {
             if (getActivity() instanceof MainActivity) {
                 ((MainActivity) requireActivity()).switchFragment(4, true);
-                OverlayNavUtil.show(requireActivity(), new ShortcutsSettingsFragment(), "ShortcutsSettingsFragment");
+                OverlayNavUtil.show(requireActivity(), new PersonalAppearanceFragment(), "PersonalAppearanceFragment");
             }
         });
         render();
@@ -252,7 +250,6 @@ public class PersonalHomeFragment extends Fragment {
             ArrayList<String> requested = new ArrayList<>();
             requested.add(Manifest.permission.CAMERA);
             requested.add(Manifest.permission.RECORD_AUDIO);
-            if (Build.VERSION.SDK_INT >= 33) requested.add(Manifest.permission.POST_NOTIFICATIONS);
             permissions.launch(requested.toArray(new String[0]));
             return; // Granting permission never starts a recording automatically.
         }
@@ -275,7 +272,7 @@ public class PersonalHomeFragment extends Fragment {
             state = RecordingState.STARTING;
             startTime = pauseTime = pausedDuration = 0L;
         } else {
-            boolean dual = ServiceUtils.isServiceRunning(requireContext(), DualCameraRecordingService.class);
+            boolean dual = DualCameraRecordingService.hasActiveSession();
             action = dual
                     ? new Intent(requireContext(), DualCameraRecordingService.class).setAction(Constants.INTENT_ACTION_STOP_DUAL_RECORDING)
                     : new Intent(requireContext(), RecordingService.class).setAction(Constants.INTENT_ACTION_STOP_RECORDING);
@@ -316,11 +313,9 @@ public class PersonalHomeFragment extends Fragment {
 
     private void queryState() {
         if (!isAdded()) return;
-        if (ServiceUtils.isServiceRunning(requireContext(), DualCameraRecordingService.class)) {
+        if (DualCameraRecordingService.hasActiveSession()) {
             readTimeline(null);
-            state = prefs.isRecordingInProgress()
-                    ? (pauseTime > 0 ? RecordingState.PAUSED : RecordingState.IN_PROGRESS)
-                    : RecordingState.STARTING;
+            state = DualCameraRecordingService.getSessionState();
             render();
             return;
         }
@@ -395,7 +390,7 @@ public class PersonalHomeFragment extends Fragment {
             return;
         }
         Context context = requireContext();
-        boolean dual = ServiceUtils.isServiceRunning(context, DualCameraRecordingService.class);
+        boolean dual = DualCameraRecordingService.hasActiveSession();
         Class<?> service = dual ? DualCameraRecordingService.class : RecordingService.class;
         // The dual pipeline accepts a surface once its STARTED event arrives.
         // Single-camera STARTING accepts the surface to avoid its preview wait timeout.

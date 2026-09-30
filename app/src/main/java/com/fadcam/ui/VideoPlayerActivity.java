@@ -2954,26 +2954,8 @@ public class VideoPlayerActivity extends AppCompatActivity {
             // player.play(); // Uncomment if you want auto-resume on activity resume
         }
 
-        // Request notification permission on Android 13+
-        try {
-            if (android.os.Build.VERSION.SDK_INT >= 33) {
-                if (
-                    androidx.core.content.ContextCompat.checkSelfPermission(
-                        this,
-                        android.Manifest.permission.POST_NOTIFICATIONS
-                    ) !=
-                    android.content.pm.PackageManager.PERMISSION_GRANTED
-                ) {
-                    androidx.core.app.ActivityCompat.requestPermissions(
-                        this,
-                        new String[] {
-                            android.Manifest.permission.POST_NOTIFICATIONS,
-                        },
-                        1010
-                    );
-                }
-            }
-        } catch (Exception ignored) {}
+        // Notification visibility is a user choice in settings. Playback must
+        // not prompt to re-enable notifications disabled for quiet recording.
 
         // Enter immersive fullscreen (hide status and navigation bars)
         try {

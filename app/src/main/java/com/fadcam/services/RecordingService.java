@@ -63,6 +63,7 @@ import com.fadcam.utils.PhotoStorageHelper;
 import com.fadcam.utils.RecordingStoragePaths;
 import com.fadcam.utils.RuntimeCompat;
 import com.fadcam.utils.ServiceStartPolicy;
+import com.fadcam.utils.RecordingHaptics;
 import com.fadcam.forensics.service.DigitalForensicsEventRecorder;
 
 import java.io.File;
@@ -151,7 +152,19 @@ public class RecordingService extends Service {
     
     private static final long GPS_PROVIDER_CHECK_INTERVAL_MS = 5000;
 
-    private RecordingState recordingState = RecordingState.NONE;
+    private volatile RecordingState recordingState = RecordingState.NONE;
+    private static volatile RecordingService liveInstance;
+    private final RecordingHaptics recordingHaptics = new RecordingHaptics();
+
+    /** Actual in-process service state, never a persisted preference or UI copy. */
+    public static boolean hasActiveSession() {
+        return getSessionState() != RecordingState.NONE;
+    }
+
+    public static RecordingState getSessionState() {
+        RecordingService service = liveInstance;
+        return service != null && !service.isStopping ? service.recordingState : RecordingState.NONE;
+    }
     private boolean previewOnlyActive = false;
     private boolean pendingPreviewOnlyStart = false;
     private volatile boolean previewSessionConfigInFlight = false;
@@ -261,6 +274,7 @@ public class RecordingService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        liveInstance = this;
         // Initialize essential components first
         sharedPreferencesManager = SharedPreferencesManager.getInstance(getApplicationContext());
         initializeDurationLimitController();
@@ -1681,6 +1695,7 @@ public class RecordingService extends Service {
                 }
                 // Update the UI and Service state atomically
                 recordingStartDispatched.set(false);
+                recordingHaptics.beginSession();
                 recordingState = RecordingState.STARTING;
                 // Clear a stale stopping flag from a previous recording that
                 // may still be cleaning up asynchronously on a background thread.
@@ -2166,6 +2181,8 @@ public class RecordingService extends Service {
     @Override
     public void onDestroy() {
         FLog.d(TAG, "onDestroy: Service being destroyed...");
+        if (liveInstance == this) liveInstance = null;
+        recordingHaptics.onRecordingStopped(this);
         // Safety net: drop any in-flight finalization guard (the process is
         // going away; a stale entry would block future repairs of this file).
         IN_FLIGHT_FINALIZATIONS.clear();
@@ -2275,6 +2292,7 @@ public class RecordingService extends Service {
         }
 
         isStopping = true;
+        recordingHaptics.onRecordingStopped(this);
         FLog.i(TAG, ">> stopRecording sequence initiated. Current state: " + recordingState);
 
         // Stop black frame rendering if active
@@ -5408,10 +5426,6 @@ public class RecordingService extends Service {
     }
 
     private void broadcastOnRecordingStopped() {
-        // Tactile confirmation that recording stopped — fired at the earliest
-        // stop-confirmed point (before any heavy cleanup that could throw), so
-        // it works for widgets, tiles, shortcuts and background stops too.
-        com.fadcam.Utils.vibrateRecordingStop(this);
         Intent broadcastIntent = new Intent(Constants.BROADCAST_ON_RECORDING_STOPPED);
         broadcastIntent.setPackage(getPackageName());
         sendBroadcast(broadcastIntent);
@@ -6769,10 +6783,7 @@ public class RecordingService extends Service {
                 persistRecordingTimelineState();
                 startDurationLimitSession();
 
-                // Tactile confirmation that recording actually started — fired
-                // from the SERVICE so it works for widgets, tiles, shortcuts and
-                // background starts too (gated by the Haptic feedback setting).
-                com.fadcam.Utils.vibrateRecordingStart(this);
+                recordingHaptics.onRecordingStarted(this);
 
                 // Setup notification
                 setupRecordingInProgressNotification();

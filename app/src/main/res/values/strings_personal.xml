@@ -10,7 +10,7 @@
     <string name="personal_home_starting">Starting…</string>
     <string name="personal_home_waiting">Waiting for camera…</string>
     <string name="personal_home_syncing">Checking status…</string>
-    <string name="personal_home_hint">Recording continues with the screen off.\nStop from the notification or this screen.</string>
+    <string name="personal_home_hint">Recording continues with the screen off.\nStop from this screen or the quick recording button.</string>
     <string name="personal_home_permission_hint">Allow camera and microphone access to get ready.\nRecording starts only when you tap again.</string>
     <string name="personal_home_grant_permissions">Allow access</string>
     <string name="personal_home_permissions_ready">Ready. Tap Start recording when you want to record.</string>
@@ -24,5 +24,5 @@
     <string name="personal_home_audio_on">Audio on</string>
     <string name="personal_home_audio_off">Audio off</string>
     <string name="personal_home_settings">Recording settings</string>
-    <string name="personal_home_shortcuts">Customize shortcut</string>
+    <string name="personal_home_shortcuts">App name and icon</string>
 </resources>

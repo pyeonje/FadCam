@@ -44,8 +44,8 @@ public class PersonalSettingsFragment extends Fragment {
                 R.string.personal_settings_audio_hint, AudioSettingsFragment::new);
         addRow(content, R.drawable.ic_folder_open, R.string.personal_settings_storage,
                 R.string.personal_settings_storage_hint, StorageSettingsFragment::new);
-        addRow(content, R.drawable.ic_house, R.string.personal_settings_shortcut,
-                R.string.personal_settings_shortcut_hint, ShortcutsSettingsFragment::new);
+        addRow(content, R.drawable.ic_house, R.string.personal_appearance_title,
+                R.string.personal_appearance_settings_hint, PersonalAppearanceFragment::new);
         addRow(content, R.drawable.ic_notifications, R.string.personal_settings_notification,
                 R.string.personal_settings_notification_hint, NotificationSettingsFragment::new);
         addRow(content, R.drawable.ic_camera, R.string.personal_settings_watermark,

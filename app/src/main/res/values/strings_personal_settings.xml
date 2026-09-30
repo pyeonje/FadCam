@@ -12,7 +12,7 @@
     <string name="personal_settings_shortcut">Recording icon</string>
     <string name="personal_settings_shortcut_hint">Custom name and image · add to home screen</string>
     <string name="personal_settings_notification">Notifications</string>
-    <string name="personal_settings_notification_hint">Recording status and controls</string>
+    <string name="personal_settings_notification_hint">Notification visibility and controls</string>
     <string name="personal_settings_automation">Scheduled recording</string>
     <string name="personal_settings_automation_hint">Schedule a start and stop time</string>
     <string name="personal_settings_watermark">Date and watermark</string>

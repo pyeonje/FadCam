@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="personal_appearance_title">App name and icon</string>
+    <string name="personal_appearance_settings_hint">Choose names and pictures for your home screen</string>
+    <string name="personal_appearance_back">Close</string>
+    <string name="personal_appearance_hint">Choose names and images, then apply them to your home screen. The first application adds a custom shortcut. Use that shortcut and manually remove the old default icon if you wish; the original app icon keeps its name.</string>
+    <string name="personal_appearance_main">Main app</string>
+    <string name="personal_appearance_main_hint">Opens recording, videos, and settings.</string>
+    <string name="personal_appearance_quick">Quick recording / stop</string>
+    <string name="personal_appearance_quick_hint">Starts with saved settings. Tap again to stop.</string>
+    <string name="personal_appearance_drawer_limit">The app drawer keeps its default name and icon.</string>
+    <string name="personal_appearance_other_shortcuts">Separate start and stop shortcuts</string>
+    <string name="personal_appearance_preview">Home screen icon preview</string>
+    <string name="personal_appearance_name">Name</string>
+    <string name="personal_appearance_choose_image">Choose image from gallery</string>
+    <string name="personal_appearance_default_icon">Default icon</string>
+    <string name="personal_appearance_reset">Reset</string>
+    <string name="personal_appearance_apply">Apply / add to home screen</string>
+    <string name="personal_appearance_updated">Updated your existing home screen icon.</string>
+    <string name="personal_appearance_pin_requested">Confirm Add in the home screen prompt.</string>
+    <string name="personal_appearance_pin_unsupported">This launcher does not support adding shortcuts from an app.</string>
+    <string name="personal_appearance_apply_failed">Could not apply the home screen icon. Try again.</string>
+    <string name="personal_appearance_image_failed">Could not load this image. Choose another image.</string>
+</resources>

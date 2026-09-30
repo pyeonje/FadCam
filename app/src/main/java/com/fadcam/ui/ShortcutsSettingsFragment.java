@@ -72,7 +72,7 @@ public class ShortcutsSettingsFragment extends Fragment {
         wireShortcutRow(view, R.id.cell_toggle, R.id.icon_toggle, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_toggle_recording),
                 new Intent(Intent.ACTION_VIEW)
-                        .setClassName(requireContext(), "com.fadcam.RecordingToggleActivity"),
+                        .setClassName(requireContext(), "com.fadcam.PersonalRecordingStartActivity"),
                 ShortcutsManager.ID_TOGGLE);
         wireShortcutRow(view, R.id.cell_start, R.id.icon_start, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_start_back),
@@ -238,6 +238,10 @@ public class ShortcutsSettingsFragment extends Fragment {
     private void requestPin(String shortcutId, String defaultLabel, int iconRes, Intent intent) {
         Context ctx = requireContext();
         ShortcutsManager sm = new ShortcutsManager(ctx);
+        if (sm.updateExistingPinned(shortcutId, intent, iconRes, defaultLabel)) {
+            android.widget.Toast.makeText(ctx, R.string.personal_appearance_updated, android.widget.Toast.LENGTH_LONG).show();
+            return;
+        }
         if (!sm.isPinSupported()) {
             android.widget.Toast.makeText(ctx, R.string.widgets_pin_unsupported, android.widget.Toast.LENGTH_SHORT)
                     .show();
@@ -475,7 +479,7 @@ public class ShortcutsSettingsFragment extends Fragment {
         wireShortcutRow(view, R.id.cell_toggle, R.id.icon_toggle, R.drawable.personal_calendar_quick,
                 getString(R.string.shortcut_toggle_recording),
                 new Intent(Intent.ACTION_VIEW)
-                        .setClassName(requireContext(), "com.fadcam.RecordingToggleActivity"),
+                        .setClassName(requireContext(), "com.fadcam.PersonalRecordingStartActivity"),
                 ShortcutsManager.ID_TOGGLE);
         // Start
         wireShortcutRow(view, R.id.cell_start, R.id.icon_start, R.drawable.personal_calendar_quick,

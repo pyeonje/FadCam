@@ -36,6 +36,9 @@ public class NotificationSettingsFragment extends Fragment {
         com.fadcam.Utils.attachPressScaleToClickableRows(view);
         super.onViewCreated(view, savedInstanceState);
         prefs = SharedPreferencesManager.getInstance(requireContext());
+        view.findViewById(R.id.personal_notification_system_settings).setOnClickListener(v ->
+                startActivity(new android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, requireContext().getPackageName())));
     valuePreset = view.findViewById(R.id.value_notification_preset);
     previewTitle = view.findViewById(R.id.preview_title);
     previewText = view.findViewById(R.id.preview_text);
@@ -50,11 +53,19 @@ public class NotificationSettingsFragment extends Fragment {
     }
 
     private void refreshValues(){
+        TextView visibility = getView() == null ? null : getView().findViewById(R.id.personal_notification_visibility_value);
+        if (visibility != null) visibility.setText(androidx.core.app.NotificationManagerCompat.from(requireContext())
+                .areNotificationsEnabled() ? R.string.personal_notification_shown : R.string.personal_notification_hidden);
         String preset = prefs.getNotificationPreset();
         if(valuePreset!=null){ valuePreset.setText(mapPresetLabel(preset)); }
         updatePreview(preset);
     TextView hideValue = getView()==null? null : getView().findViewById(R.id.value_hide_stop_button);
     if(hideValue!=null){ hideValue.setText(prefs.isNotificationStopButtonHidden()? getString(R.string.notification_stop_button_hidden) : getString(R.string.notification_stop_button_visible)); }
+    }
+
+    @Override public void onResume() {
+        super.onResume();
+        if (prefs != null) refreshValues();
     }
 
     private void showPresetPicker(){
