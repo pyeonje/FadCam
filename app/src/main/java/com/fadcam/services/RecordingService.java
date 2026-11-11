@@ -2179,16 +2179,8 @@ public class RecordingService extends Service {
             return;
         }
         glRecordingPipeline.capturePhotoFrame(bitmap -> {
-            if (bitmap == null) {
-                mainHandler.post(() -> Toast.makeText(getApplicationContext(),
-                        R.string.photo_capture_failed, Toast.LENGTH_SHORT).show());
-                return;
-            }
-            if (backgroundHandler == null) {
-                bitmap.recycle();
-                return;
-            }
-            backgroundHandler.post(() -> {
+            if (bitmap == null) { notifyPhotoSaveFailure(); return; }
+            com.fadcam.utils.PhotoSaveDispatch.post(backgroundHandler, bitmap, () -> {
                 CameraType selected = sharedPreferencesManager != null
                         ? sharedPreferencesManager.getCameraSelection()
                         : CameraType.BACK;
@@ -2196,41 +2188,40 @@ public class RecordingService extends Service {
                         ? PhotoStorageHelper.ShotSource.SELFIE
                         : PhotoStorageHelper.ShotSource.BACK;
                 Bitmap bitmapForSave = bitmap;
-                if (previewOnlyActive && recordingState == RecordingState.NONE) {
-                    Bitmap normalized = normalizePreviewOnlyShotBitmap(bitmapForSave);
-                    if (normalized != null && normalized != bitmapForSave) {
-                        bitmapForSave.recycle();
-                        bitmapForSave = normalized;
+                try {
+                    if (previewOnlyActive && recordingState == RecordingState.NONE) {
+                        Bitmap normalized = normalizePreviewOnlyShotBitmap(bitmapForSave);
+                        if (normalized != null && normalized != bitmapForSave) {
+                            bitmapForSave.recycle();
+                            bitmapForSave = normalized;
+                        }
+                        Bitmap cropped = cropVerticalLetterbox(bitmapForSave);
+                        if (cropped != null && cropped != bitmapForSave) {
+                            bitmapForSave.recycle();
+                            bitmapForSave = cropped;
+                        }
                     }
-                    Bitmap cropped = cropVerticalLetterbox(bitmapForSave);
-                    if (cropped != null && cropped != bitmapForSave) {
-                        bitmapForSave.recycle();
-                        bitmapForSave = cropped;
-                    }
-                }
-                // Build extra watermark data from live sensors/location
-                String extraWatermark = buildPhotoWatermarkExtras();
-                Uri savedUri = PhotoStorageHelper.saveJpegBitmap(
-                        getApplicationContext(),
-                        bitmapForSave,
-                        true,
-                        shotSource,
-                        extraWatermark);
-                bitmapForSave.recycle();
-                if (savedUri != null) {
+                    Uri savedUri = PhotoStorageHelper.saveJpegBitmap(getApplicationContext(), bitmapForSave,
+                            true, shotSource, buildPhotoWatermarkExtras());
+                    if (savedUri == null) { notifyPhotoSaveFailure(); return; }
                     Intent updateIntent = new Intent(Constants.ACTION_RECORDING_COMPLETE);
                     updateIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, true);
                     updateIntent.putExtra(Constants.EXTRA_RECORDING_URI_STRING, savedUri.toString());
                     sendBroadcast(updateIntent);
                     mainHandler.post(() -> Toast.makeText(getApplicationContext(),
                             R.string.photo_capture_saved, Toast.LENGTH_SHORT).show());
-                } else {
-                    mainHandler.post(() -> Toast.makeText(getApplicationContext(),
-                            R.string.photo_capture_failed, Toast.LENGTH_SHORT).show());
+                } finally {
+                    if (!bitmapForSave.isRecycled()) bitmapForSave.recycle();
                 }
-            });
+            }, this::notifyPhotoSaveFailure);
         });
     }
+
+    private void notifyPhotoSaveFailure() {
+        mainHandler.post(() -> Toast.makeText(getApplicationContext(),
+                R.string.photo_capture_failed, Toast.LENGTH_SHORT).show());
+    }
+
 
     @Nullable
     private Bitmap normalizePreviewOnlyShotBitmap(@NonNull Bitmap source) {
@@ -2568,52 +2559,31 @@ public class RecordingService extends Service {
                 }
                 final boolean recordingSaved = outputSaved;
 
-                // Delete temporary file if in STREAM_ONLY mode
-                if (currentSegmentFile != null && currentSegmentFile.exists()) {
-                    com.fadcam.streaming.RemoteStreamManager.StreamingMode streamingMode = 
-                        com.fadcam.streaming.RemoteStreamManager.getInstance().getStreamingMode();
-                    if (streamingMode == com.fadcam.streaming.RemoteStreamManager.StreamingMode.STREAM_ONLY) {
-                        boolean deleted = currentSegmentFile.delete();
-                        if (deleted) {
-                            FLog.i(TAG, "🗑️ STREAM_ONLY: Deleted temporary file: " + currentSegmentFile.getName());
-                        } else {
-                            FLog.w(TAG, "⚠️ Failed to delete temporary file: " + currentSegmentFile.getAbsolutePath());
-                        }
-                    }
-                }
-
-                // STREAM_ONLY: Clean up ALL tracked temporary files (internal storage)
-                // Handles segment splits where multiple temp files were created
-                if (!streamOnlyTempFiles.isEmpty()) {
-                    FLog.i(TAG, "🗑️ STREAM_ONLY: Cleaning up " + streamOnlyTempFiles.size() + " tracked temp files");
+                // Only discard positively identified empty streaming placeholders.
+                // Current stream preferences do not determine ownership of prior segments.
+                if (recordingSaved) {
                     for (File tempFile : streamOnlyTempFiles) {
-                        if (tempFile != null && tempFile.exists()) {
-                            boolean deleted = tempFile.delete();
-                            FLog.i(TAG, "🗑️ STREAM_ONLY: " + (deleted ? "Deleted" : "FAILED to delete") + " temp: " + tempFile.getName());
+                        if (tempFile != null && tempFile.isFile() && tempFile.length() == 0
+                                && !tempFile.delete()) {
+                            FLog.w(TAG, "빈 스트리밍 임시 파일을 삭제하지 못했습니다.");
                         }
                     }
-                    streamOnlyTempFiles.clear();
-                }
-
-                // STREAM_ONLY (SAF): Clean up tracked SAF URIs (SD card storage)
-                // These are 0-byte files created for the GL pipeline but never written to
-                if (!streamOnlySafUris.isEmpty()) {
-                    FLog.i(TAG, "🗑️ STREAM_ONLY (SAF): Cleaning up " + streamOnlySafUris.size() + " tracked SAF files");
-                    for (String uriStr : streamOnlySafUris) {
+                    for (String uriString : streamOnlySafUris) {
+                        Uri uri = Uri.parse(uriString);
                         try {
-                            Uri safUri = Uri.parse(uriStr);
-                            androidx.documentfile.provider.DocumentFile docFile =
-                                    androidx.documentfile.provider.DocumentFile.fromSingleUri(RecordingService.this, safUri);
-                            if (docFile != null && docFile.exists()) {
-                                boolean deleted = docFile.delete();
-                                FLog.i(TAG, "🗑️ STREAM_ONLY (SAF): " + (deleted ? "Deleted" : "FAILED to delete") + " URI: " + uriStr);
+                            boolean empty;
+                            try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
+                                empty = descriptor != null && descriptor.getStatSize() == 0;
                             }
+                            if (empty) androidx.documentfile.provider.DocumentFile
+                                    .fromSingleUri(RecordingService.this, uri).delete();
                         } catch (Exception e) {
-                            FLog.w(TAG, "⚠️ STREAM_ONLY (SAF): Error deleting URI: " + uriStr + " - " + e.getMessage());
+                            FLog.w(TAG, "스트리밍 임시 파일이 비었는지 확인하지 못했습니다. 파일을 유지합니다.", e);
                         }
                     }
-                    streamOnlySafUris.clear();
                 }
+                streamOnlyTempFiles.clear();
+                streamOnlySafUris.clear();
 
                 // Give some time for the GL pipeline to release resources
                 try {
@@ -2645,6 +2615,7 @@ public class RecordingService extends Service {
 
                 // Final cleanup on the main thread
                 mainHandler.post(() -> {
+                    boolean saved = recordingSaved;
                     // Release wake lock if held
                     if (recordingWakeLock != null && recordingWakeLock.isHeld()) {
                         try {
@@ -2661,6 +2632,7 @@ public class RecordingService extends Service {
                             safRecordingPfd.close();
                             // log removed
                         } catch (Exception e) {
+                            saved = false;
                             FLog.e(TAG, "Error closing SAF ParcelFileDescriptor (background thread)", e);
                         }
                         safRecordingPfd = null;
@@ -2673,6 +2645,7 @@ public class RecordingService extends Service {
                             currentSegmentParcelFileDescriptor.close();
                             FLog.d(TAG, "Closed current segment ParcelFileDescriptor after recording");
                         } catch (Exception e) {
+                            saved = false;
                             FLog.e(TAG, "Error closing current segment PFD", e);
                         }
                         currentSegmentParcelFileDescriptor = null;
@@ -2701,7 +2674,7 @@ public class RecordingService extends Service {
                     // refresh
                     try {
                         Intent recordingCompleteIntent = new Intent(Constants.ACTION_RECORDING_COMPLETE);
-                        recordingCompleteIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, recordingSaved);
+                        recordingCompleteIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, saved);
                         // Note: We don't have the specific URI here, but RecordsFragment will do a full
                         // refresh
                         sendBroadcast(recordingCompleteIntent);
@@ -2711,7 +2684,7 @@ public class RecordingService extends Service {
 
                     FLog.d(TAG, "stopRecording sequence completed successfully");
                     removeInFlightFinalization(inFlightUri);
-                    if (recordingSaved) {
+                    if (saved) {
                         finalizeJustStoppedRecording();
                     } else {
                         Toast.makeText(this, R.string.personal_recording_save_failed, Toast.LENGTH_LONG).show();

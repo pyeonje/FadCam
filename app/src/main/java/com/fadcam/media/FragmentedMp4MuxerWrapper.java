@@ -100,7 +100,7 @@ public class FragmentedMp4MuxerWrapper {
     /** Bounded AVC corruption tracing (first fragment only, non-flooding). */
     private long committedOutputEnd;
     private android.system.StructStat outputIdentity;
-    private IOException outputFailure;
+    private volatile IOException outputFailure;
     private boolean writerClosed;
 
     private static android.system.StructStat stat(FileOutputStream stream) {
@@ -293,6 +293,8 @@ public class FragmentedMp4MuxerWrapper {
     public void writeSampleData(int trackIndex, @NonNull ByteBuffer byteBuf,
                                  @NonNull MediaCodec.BufferInfo bufferInfo) {
         synchronized (muxerLock) {
+            IOException failure = outputFailure;
+            if (failure != null) throw new IllegalStateException("녹화 출력에 쓰지 못했습니다.", failure);
             if (!started) {
                 throw new IllegalStateException("Muxer has not been started");
             }
@@ -755,55 +757,103 @@ public class FragmentedMp4MuxerWrapper {
      * Extracts per-track sample counts and trun data offsets from a fragment's
      * moof box, needed to build stco/stsc entries in the final moov.
      */
-    private void parseFragmentForFinalization(byte[] data) {
-        try {
-            int moofSize = readIntBE(data, 0);
-            int audioCnt = 0, videoCnt = 0, audioOff = 0, videoOff = 0;
-            int pos = 8;
-            int mfhdSz = readIntBE(data, pos);
-            if (mfhdSz < 12) return;
-            pos += mfhdSz;
-            while (pos + 8 <= moofSize) {
-                int s = readIntBE(data, pos), t = readIntBE(data, pos + 4);
-                if (s < 8 || pos + s > moofSize) break;
-                if (t == 0x74726166) { // 'traf'
-                    int[] r = findTrun(data, pos + 8, s - 8);
-                    if (r != null) {
-                        int mp4TrackId = r[0];
-                        int videoMp4Id = videoTrackIndex >= 0 ? videoTrackIndex + 1 : -1;
-                        int audioMp4Id = audioTrackIndex >= 0 ? audioTrackIndex + 1 : -1;
-                        if (mp4TrackId == videoMp4Id) {
-                            videoCnt = r[1]; videoOff = r[2];
-                        } else if (mp4TrackId == audioMp4Id) {
-                            audioCnt = r[1]; audioOff = r[2];
-                        }
-                    }
-                }
-                pos += s;
+    private static final class FragmentLayout {
+        int audioCount, videoCount, audioOffset, videoOffset;
+        long audioEnd, videoEnd;
+    }
+
+    private FragmentLayout parseFragmentForFinalization(byte[] data) throws IOException {
+        int moofSize = boxSize(data, 0, data.length);
+        if (readIntBE(data, 4) != 0x6d6f6f66 || moofSize < 20) throw invalidFragment();
+        int mdatSize = boxSize(data, moofSize, data.length);
+        if (readIntBE(data, moofSize + 4) != 0x6d646174 || moofSize + mdatSize != data.length) {
+            throw invalidFragment();
+        }
+        int mfhdSize = boxSize(data, 8, moofSize);
+        if (readIntBE(data, 12) != 0x6d666864 || mfhdSize < 16) throw invalidFragment();
+        FragmentLayout layout = new FragmentLayout();
+        for (int pos = 8 + mfhdSize; pos < moofSize;) {
+            int size = boxSize(data, pos, moofSize);
+            if (readIntBE(data, pos + 4) == 0x74726166) {
+                parseTrackRun(data, pos + 8, pos + size, moofSize + 8, layout);
             }
-            fragmentAudioCounts.add(audioCnt);
-            fragmentVideoCounts.add(videoCnt);
-            fragmentAudioOffsets.add(audioOff);
-            fragmentVideoOffsets.add(videoOff);
-        } catch (Exception ignore) {}
+            pos += size;
+        }
+        if (layout.audioCount == 0 && layout.videoCount == 0) throw invalidFragment();
+        if (layout.audioCount != 0 && layout.videoCount != 0) {
+            if (layout.audioOffset < layout.videoOffset) {
+                if (layout.audioOffset != moofSize + 8 || layout.audioEnd != layout.videoOffset
+                        || layout.videoEnd != data.length) throw invalidFragment();
+            } else if (layout.videoOffset != moofSize + 8 || layout.videoEnd != layout.audioOffset
+                    || layout.audioEnd != data.length) throw invalidFragment();
+        } else if (layout.audioCount != 0) {
+            if (layout.audioOffset != moofSize + 8 || layout.audioEnd != data.length) throw invalidFragment();
+        } else if (layout.videoOffset != moofSize + 8 || layout.videoEnd != data.length) {
+            throw invalidFragment();
+        }
+        return layout;
+    }
+
+    private void parseTrackRun(byte[] data, int first, int end, int mdatPayload,
+                               FragmentLayout layout) throws IOException {
+        int trackId = -1;
+        int trun = -1;
+        int trunSize = 0;
+        for (int pos = first; pos < end;) {
+            int size = boxSize(data, pos, end);
+            int type = readIntBE(data, pos + 4);
+            if (type == 0x74666864) { // tfhd
+                if (size < 16 || trackId != -1) throw invalidFragment();
+                trackId = readIntBE(data, pos + 12);
+            } else if (type == 0x7472756e) { // trun
+                if (size < 20 || trun != -1) throw invalidFragment();
+                trun = pos;
+                trunSize = size;
+            }
+            pos += size;
+        }
+        if (trun == -1 || trackId <= 0) throw invalidFragment();
+        int flags = readIntBE(data, trun + 8) & 0x00ff_ffff;
+        int sampleCount = readIntBE(data, trun + 12);
+        int dataOffset = readIntBE(data, trun + 16);
+        // The fixed Media3 writer emits explicit duration/size/flags and data offset,
+        // optionally one composition offset for B frames; no default sample sizes.
+        if ((flags != 0x701 && flags != 0xf01) || sampleCount <= 0 || dataOffset < mdatPayload) {
+            throw invalidFragment();
+        }
+        int stride = flags == 0xf01 ? 16 : 12;
+        if (20L + stride * (long) sampleCount != trunSize) throw invalidFragment();
+        long sampleEnd = dataOffset;
+        for (int index = 0, sample = trun + 20; index < sampleCount; index++, sample += stride) {
+            int size = readIntBE(data, sample + 4);
+            if (size <= 0 || (sampleEnd += size) > data.length) throw invalidFragment();
+        }
+        if (videoTrackIndex >= 0 && trackId == videoTrackIndex + 1 && layout.videoCount == 0) {
+            layout.videoCount = sampleCount;
+            layout.videoOffset = dataOffset;
+            layout.videoEnd = sampleEnd;
+        } else if (audioTrackIndex >= 0 && trackId == audioTrackIndex + 1 && layout.audioCount == 0) {
+            layout.audioCount = sampleCount;
+            layout.audioOffset = dataOffset;
+            layout.audioEnd = sampleEnd;
+        } else {
+            throw invalidFragment();
+        }
+    }
+
+    private static IOException invalidFragment() {
+        return new IOException("MP4 조각의 샘플 표가 실제 데이터와 일치하지 않습니다.");
+    }
+
+    private static int boxSize(byte[] data, int position, int limit) throws IOException {
+        if (position < 0 || position > limit - 8) throw invalidFragment();
+        int size = readIntBE(data, position);
+        if (size < 8 || size > limit - position) throw invalidFragment();
+        return size;
     }
 
     private static int readIntBE(byte[] d, int off) {
         return ((d[off]&0xFF)<<24)|((d[off+1]&0xFF)<<16)|((d[off+2]&0xFF)<<8)|(d[off+3]&0xFF);
-    }
-
-    private static int[] findTrun(byte[] d, int start, int len) {
-        int pos = start, tid = 0;
-        while (pos + 8 <= start + len) {
-            int s = readIntBE(d, pos), t = readIntBE(d, pos + 4);
-            if (s < 8 || pos + s > start + len) break;
-            if (t == 0x74666864) tid = readIntBE(d, pos + 12);      // 'tfhd' → track_ID (after version/flags)
-            else if (t == 0x7472756E)                                 // 'trun'
-                return new int[]{tid, readIntBE(d, pos + 12),         // sample_count
-                                       readIntBE(d, pos + 16)};      // data_offset
-            pos += s;
-        }
-        return null;
     }
 
     /**
@@ -1190,8 +1240,15 @@ public class FragmentedMp4MuxerWrapper {
      */
     private void writeSegmentWithRecovery(byte[] data, boolean isInit) throws IOException {
         if (outputFailure != null) throw outputFailure;
+        final FragmentLayout layout;
         try {
-            writeSegmentBytes(data, isInit);
+            layout = isInit ? null : parseFragmentForFinalization(data);
+        } catch (IOException invalid) {
+            outputFailure = invalid;
+            throw invalid;
+        }
+        try {
+            writeSegmentBytes(data, layout);
         } catch (IOException first) {
             segmentWriteFailures++;
             try {
@@ -1211,7 +1268,7 @@ public class FragmentedMp4MuxerWrapper {
                     closeQuietlyStream(old);
                     streamReopenCount++;
                 }
-                writeSegmentBytes(data, isInit);
+                writeSegmentBytes(data, layout);
             } catch (IOException retry) {
                 try {
                     resetToCommittedBoundary(fileOutputStream.getChannel(), committedOutputEnd);
@@ -1232,7 +1289,7 @@ public class FragmentedMp4MuxerWrapper {
         channel.position(boundary);
     }
 
-    private void writeSegmentBytes(byte[] data, boolean isInit) throws IOException {
+    private void writeSegmentBytes(byte[] data, FragmentLayout layout) throws IOException {
         long pos = committedOutputEnd;
         if (fileOutputStream.getChannel().position() != pos) {
             throw new IOException("녹화 출력 위치가 일치하지 않습니다.");
@@ -1240,12 +1297,15 @@ public class FragmentedMp4MuxerWrapper {
         fileOutputStream.write(data);
         fileOutputStream.flush();
         committedOutputEnd += data.length;
-        if (isInit) {
+        if (layout == null) {
             initSegmentData = data;
             initSegmentFilePosition = pos;
         } else {
             fragmentPositions.add(pos);
-            parseFragmentForFinalization(data);
+            fragmentAudioCounts.add(layout.audioCount);
+            fragmentAudioOffsets.add(layout.audioOffset);
+            fragmentVideoCounts.add(layout.videoCount);
+            fragmentVideoOffsets.add(layout.videoOffset);
             logFirstVideoSampleInFragment(data);
         }
     }

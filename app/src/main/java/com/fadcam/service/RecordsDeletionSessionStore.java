@@ -10,17 +10,22 @@ public class RecordsDeletionSessionStore {
 
     private static final String PREFS_NAME = "records_deletion_session_store";
     private static final String KEY_SNAPSHOT_JSON = "snapshot_json";
+    private static final Object JOURNAL_LOCK = new Object();
 
     @NonNull
     private final SharedPreferences prefs;
 
     public RecordsDeletionSessionStore(@NonNull Context context) {
-        prefs = context.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        this(context.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE));
     }
+
+    RecordsDeletionSessionStore(SharedPreferences prefs) { this.prefs = prefs; }
 
     @Nullable
     public synchronized RecordsDeletionSessionSnapshot read() {
-        return RecordsDeletionSessionSnapshot.fromJson(prefs.getString(KEY_SNAPSHOT_JSON, null));
+        synchronized (JOURNAL_LOCK) {
+            return RecordsDeletionSessionSnapshot.fromJson(prefs.getString(KEY_SNAPSHOT_JSON, null));
+        }
     }
 
     @NonNull
@@ -34,17 +39,37 @@ public class RecordsDeletionSessionStore {
     }
 
     synchronized boolean write(RecordsDeletionSessionSnapshot snapshot, @Nullable String requestId) {
-        SharedPreferences.Editor edit = prefs.edit()
-                .putString(KEY_SNAPSHOT_JSON, RecordsDeletionSessionSnapshot.toJson(snapshot));
-        if (requestId != null) edit.putBoolean("request:" + requestId, true);
-        return edit.commit();
+        return replace(RecordsDeletionSessionSnapshot.toJson(snapshot), requestId);
+    }
+
+    private boolean replace(@Nullable String json, @Nullable String requestId) {
+        synchronized (JOURNAL_LOCK) {
+            String oldJson = prefs.getString(KEY_SNAPSHOT_JSON, null);
+            String key = requestId == null ? null : "request:" + requestId;
+            boolean wasAccepted = key != null && prefs.getBoolean(key, false);
+            SharedPreferences.Editor edit = setSnapshot(prefs.edit(), json);
+            if (key != null) edit.putBoolean(key, true);
+            if (edit.commit()) return true;
+            // Android updates the in-memory preferences even when disk commit fails.
+            // Restore the last readable claim so callers cannot observe uncommitted success.
+            SharedPreferences.Editor rollback = setSnapshot(prefs.edit(), oldJson);
+            if (key != null && !wasAccepted) rollback.remove(key);
+            rollback.commit();
+            return false;
+        }
+    }
+
+    private static SharedPreferences.Editor setSnapshot(SharedPreferences.Editor edit, @Nullable String json) {
+        return json == null ? edit.remove(KEY_SNAPSHOT_JSON) : edit.putString(KEY_SNAPSHOT_JSON, json);
     }
 
     synchronized boolean alreadyAccepted(@Nullable String requestId) {
-        return requestId != null && prefs.contains("request:" + requestId);
+        synchronized (JOURNAL_LOCK) {
+            return requestId != null && prefs.getBoolean("request:" + requestId, false);
+        }
     }
 
-    public synchronized void clear() {
-        prefs.edit().remove(KEY_SNAPSHOT_JSON).apply();
+    public synchronized boolean clear() {
+        return replace(null, null);
     }
 }

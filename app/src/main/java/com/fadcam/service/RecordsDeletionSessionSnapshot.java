@@ -42,6 +42,7 @@ public class RecordsDeletionSessionSnapshot {
     @Nullable public RecordsDeletionRequestItem inFlight;
     @Nullable public String inFlightOutputUri;
     @Nullable public Long inFlightVerifiedBytes;
+    @Nullable public String inFlightVerifiedDigest;
     public long inFlightStartedAtMs;
     @NonNull public List<String> residualOutputUris = new ArrayList<>();
 
@@ -66,6 +67,7 @@ public class RecordsDeletionSessionSnapshot {
         inFlight = null;
         inFlightOutputUri = null;
         inFlightVerifiedBytes = null;
+        inFlightVerifiedDigest = null;
         inFlightStartedAtMs = 0;
     }
 
@@ -77,6 +79,7 @@ public class RecordsDeletionSessionSnapshot {
         inFlight = null;
         inFlightOutputUri = null;
         inFlightVerifiedBytes = null;
+        inFlightVerifiedDigest = null;
         inFlightStartedAtMs = 0;
     }
     public long totalBytes;

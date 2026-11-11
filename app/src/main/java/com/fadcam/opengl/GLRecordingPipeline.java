@@ -55,6 +55,17 @@ public class GLRecordingPipeline {
     private volatile boolean isStopped = false;
     private boolean recordingStarted;
     private volatile RuntimeException recordingFailure;
+    private final Object recordingFailureLock = new Object();
+
+    private void recordFailure(String message, Throwable cause) {
+        synchronized (recordingFailureLock) {
+            if (recordingFailure == null) recordingFailure = new IllegalStateException(message, cause);
+            else if (cause != null && cause != recordingFailure && cause != recordingFailure.getCause()
+                    && recordingFailure.getSuppressed().length < 4) {
+                recordingFailure.addSuppressed(cause);
+            }
+        }
+    }
     private HandlerThread renderThread;
     private Handler handler;
     /** Dedicated thread for draining encoder output and writing to muxer.
@@ -148,24 +159,18 @@ public class GLRecordingPipeline {
             return -1;  // Skip this frame
         }
         
-        // Use System.nanoTime() reference (same as audio thread for sync)
-        // Initialize recording start time on first frame
-        if (recordingStartSystemTimeNanos == -1) {
-            synchronized (timestampLock) {
-                if (recordingStartSystemTimeNanos == -1) {
-                    recordingStartSystemTimeNanos = System.nanoTime();
-                    FLog.d(TAG, "[VIDEO_TIMESTAMP] Recording system time reference initialized: " + 
-                          recordingStartSystemTimeNanos + " nanos");
-                }
-            }
+        synchronized (timestampLock) {
+            if (recordingStartSystemTimeNanos == -1) return -1;
+            return elapsedCaptureUsLocked();
         }
-        
-        // Calculate relative timestamp from system time reference (same as audio!)
-        // This ensures both audio and video use the exact same timing base
-        long elapsedNanos = System.nanoTime() - recordingStartSystemTimeNanos - totalPauseDurationNanos;
-        long ptsUs = Math.max(0, elapsedNanos / 1000L);  // Convert to microseconds, ensure non-negative
-        
-        return ptsUs;
+    }
+
+    private long elapsedCaptureUsLocked() {
+        if (recordingStartSystemTimeNanos == -1) {
+            throw new IllegalStateException("녹화 시작 시각을 초기화하지 못했습니다.");
+        }
+        return Math.max(0L, (System.nanoTime() - recordingStartSystemTimeNanos
+                - totalPauseDurationNanos) / 1000L);
     }
 
     private long maxFileSizeBytes = Long.MAX_VALUE;
@@ -195,7 +200,14 @@ public class GLRecordingPipeline {
     private int videoTrackIndex = -1; // Track index for video in the muxer
     private boolean audioEncoderStarted = false;
     private boolean audioRecordingEnabled = false;
-    private boolean audioThreadRunning = false;
+    private volatile boolean audioThreadRunning = false;
+    private Boolean audioEnabledForSession;
+
+    public synchronized void setAudioEnabledForSession(boolean enabled) {
+        if (recordingStarted || isStopped) throw new IllegalStateException("녹화 오디오 설정이 이미 확정됐습니다.");
+        audioEnabledForSession = enabled;
+        audioRecordingEnabled = enabled;
+    }
     /** Realtime mute: when true, captured mic frames are zeroed so the AAC track
      *  stays continuous (no desync) but silent. Toggled live from the home UI. */
     private volatile boolean audioMuted = false;
@@ -773,18 +785,6 @@ public class GLRecordingPipeline {
                 } catch (Throwable ignore) {
                 }
                 
-                // Reset timestamp tracking at recording start — only on the very
-                // first start.  During a camera-switch reconfiguration,
-                // startRecording() may be called again while isRecording is
-                // temporarily false, but the timestamp base must NOT change
-                // or audio/video PTS values will jump by hours.
-                recordingStartTimeNanos = -1;
-                synchronized (timestampLock) {
-                    if (recordingStartSystemTimeNanos == -1) {
-                        recordingStartSystemTimeNanos = System.nanoTime();
-                    }
-                }
-
                 // Make sure we have a valid renderer and surfaces
                 if (glRenderer == null || encoderInputSurface == null) {
                     prepareSurfaces();
@@ -800,6 +800,12 @@ public class GLRecordingPipeline {
 
                 recordingStarted = true;
                 if (mediaMuxer == null) setupMuxer();
+                synchronized (timestampLock) {
+                    if (recordingStartSystemTimeNanos == -1) {
+                        recordingStartTimeNanos = -1;
+                        recordingStartSystemTimeNanos = System.nanoTime();
+                    }
+                }
 
                 // Initialize audio settings
                 initAudioSettings();
@@ -871,98 +877,58 @@ public class GLRecordingPipeline {
      * This ensures audio and video have the same duration.
      */
     private void emergencyDrainEncoders() {
-        // drain log removed
-
         videoEosReceived = false;
-        audioEosReceived = !audioRecordingEnabled; // If no audio, mark as done
-
-        // Step 1: Signal EOS to video encoder FIRST
-        // Video must signal EOS before we stop audio to ensure synchronized duration
+        audioEosReceived = false;
         if (videoEncoder != null) {
             try {
                 videoEncoder.signalEndOfInputStream();
-                // eos log removed
-            } catch (Exception e) {
-                FLog.e(TAG, "Error signaling video EOS", e);
-                videoEosReceived = true; // Mark as done to prevent infinite loop
+                videoEosReceived = waitForEos(this::drainEncoderUntilEos, "영상");
+            } catch (RuntimeException error) {
+                recordFailure("영상 종료 신호를 보내지 못했습니다.", error);
             }
+        }
+        if (!audioRecordingEnabled) return;
+
+        audioThreadRunning = false;
+        try {
+            // Stop AudioRecord first to unblock a pending native read. The audio
+            // input owner still queues EOS and exits before anyone releases its codec.
+            if (audioRecord != null && audioRecord.getRecordingState()
+                    == android.media.AudioRecord.RECORDSTATE_RECORDING) audioRecord.stop();
+        } catch (RuntimeException error) {
+            recordFailure("오디오 입력을 종료하지 못했습니다.", error);
+        }
+        if (audioThread != null) {
+            awaitDrainOwner(audioThread);
+            audioThread = null;
+        }
+        if (audioEncoder == null || !audioEncoderStarted) {
+            recordFailure("오디오 인코더 종료를 확인하지 못했습니다.", null);
         } else {
-            videoEosReceived = true;
+            audioEosReceived = waitForEos(this::drainAudioEncoderUntilEos, "오디오");
         }
+    }
 
-        // Step 2: Drain video encoder FIRST until EOS
-        // This ensures we know exactly when video ends
-        long safetyTimeoutMs = 10000; // 10 seconds safety timeout
-        long startTime = System.currentTimeMillis();
-        
-        while (!videoEosReceived && (System.currentTimeMillis() - startTime < safetyTimeoutMs)) {
-            try {
-                videoEosReceived = drainEncoderUntilEos();
-                if (!videoEosReceived) {
-                    Thread.sleep(1);
-                }
-            } catch (Exception e) {
-                FLog.e(TAG, "Error draining video encoder", e);
-                videoEosReceived = true;
-            }
-        }
-        
-        if (videoEosReceived) {
-            // eos log removed
-        } else {
-            FLog.w(TAG, "Video drain timeout - proceeding with audio stop");
-        }
+    private boolean waitForEos(java.util.function.BooleanSupplier drain, String track) {
+        return waitForEos(drain, track, 10_000L);
+    }
 
-        // Step 3: NOW stop audio recording (after video is done)
-        // This ensures audio records for at least as long as video
-        if (audioRecordingEnabled) {
-            try {
-                // Stop the audio thread - this will trigger EOS signaling
-                audioThreadRunning = false;
-                
-                // Wait for audio thread to signal EOS and exit
-                if (audioThread != null) {
-                    try {
-                        audioThread.join(3000); // Wait up to 3s for audio thread
-                        // audio log removed
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        FLog.w(TAG, "Interrupted waiting for audio thread");
-                    }
-                }
-                
-                // Now stop AudioRecord if still running
-                if (audioRecord != null
-                        && audioRecord.getRecordingState() == android.media.AudioRecord.RECORDSTATE_RECORDING) {
-                    audioRecord.stop();
-                    // audio log removed
-                }
-            } catch (Exception e) {
-                FLog.e(TAG, "Error stopping audio input", e);
-            }
+    boolean waitForEos(java.util.function.BooleanSupplier drain, String track, long timeoutMs) {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        try {
+            do {
+                if (drain.getAsBoolean()) return true;
+                if (System.nanoTime() >= deadline) break;
+                Thread.sleep(1);
+            } while (System.nanoTime() < deadline);
+            recordFailure(track + " 종료 신호가 도착하지 않았습니다.", null);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            recordFailure(track + " 종료 대기가 중단됐습니다.", error);
+        } catch (RuntimeException error) {
+            recordFailure(track + " 인코더 출력 처리에 실패했습니다.", error);
         }
-
-        // Step 4: Drain audio encoder until EOS
-        startTime = System.currentTimeMillis();
-        while (!audioEosReceived && (System.currentTimeMillis() - startTime < safetyTimeoutMs)) {
-            try {
-                audioEosReceived = drainAudioEncoderUntilEos();
-                if (!audioEosReceived) {
-                    Thread.sleep(1);
-                }
-            } catch (Exception e) {
-                FLog.e(TAG, "Error draining audio encoder", e);
-                audioEosReceived = true;
-            }
-        }
-
-        if (audioEosReceived) {
-            // audio log removed
-        } else {
-            FLog.w(TAG, "Audio drain timeout");
-        }
-
-        // audio log removed
+        return false;
     }
 
     /**
@@ -970,14 +936,14 @@ public class GLRecordingPipeline {
      * @return true if EOS was received, false if more draining needed
      */
     private boolean drainEncoderUntilEos() {
-        if (videoEncoder == null || mediaMuxer == null) {
-            return true; // Nothing to drain
+        if (videoEncoder == null) {
+            return false;
         }
 
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         
         // Process all available buffers
-        while (true) {
+        for (int batch = 0; batch < 32; batch++) {
             int outputBufferIndex = videoEncoder.dequeueOutputBuffer(bufferInfo, 10000); // 10ms timeout
             
             if (outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
@@ -985,7 +951,7 @@ public class GLRecordingPipeline {
             } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 // Handle format change (should have happened during recording)
                 MediaFormat newFormat = videoEncoder.getOutputFormat();
-                if (!muxerStarted && videoTrackIndex == -1) {
+                if (mediaMuxer != null && !muxerStarted && videoTrackIndex == -1) {
                     cachedVideoFormat = newFormat;
                     videoTrackIndex = mediaMuxer.addTrack(newFormat);
                     if (!audioRecordingEnabled || audioTrackIndex != -1) {
@@ -996,7 +962,7 @@ public class GLRecordingPipeline {
             } else if (outputBufferIndex >= 0) {
                 ByteBuffer encodedData = videoEncoder.getOutputBuffer(outputBufferIndex);
                 
-                if (encodedData != null && bufferInfo.size > 0 && muxerStarted && videoTrackIndex != -1) {
+                if (encodedData != null && bufferInfo.size > 0 && mediaMuxer != null && muxerStarted && videoTrackIndex != -1) {
                     // Skip codec config data
                     if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
                         try {
@@ -1005,10 +971,11 @@ public class GLRecordingPipeline {
                             // PTS is already contiguous — getSynchronizedVideoTimestamp() subtracts
                             // totalPauseDurationNanos before feeding frames to the encoder, so no
                             // additional correction is needed here.
-                            mediaMuxer.writeSampleData(videoTrackIndex, encodedData, bufferInfo);
+                            writeSampleToMuxer(videoTrackIndex, encodedData, bufferInfo);
                             segmentBytesWritten += bufferInfo.size;
                         } catch (Exception e) {
                             FLog.e(TAG, "Error writing final video frame", e);
+                                recordFailure("인코딩한 샘플을 파일에 쓰지 못했습니다.", e);
                         }
                     }
                 }
@@ -1026,6 +993,7 @@ public class GLRecordingPipeline {
                 return false;
             }
         }
+        return false;
     }
 
     /**
@@ -1034,22 +1002,19 @@ public class GLRecordingPipeline {
      */
     private boolean drainAudioEncoderUntilEos() {
         if (!audioRecordingEnabled || audioEncoder == null || !audioEncoderStarted) {
-            return true; // Nothing to drain
-        }
-        if (mediaMuxer == null) {
-            return true;
+            return false;
         }
 
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         
-        while (true) {
+        for (int batch = 0; batch < 32; batch++) {
             int outputBufferIndex = audioEncoder.dequeueOutputBuffer(bufferInfo, 10000); // 10ms timeout
             
             if (outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                 return false; // No buffer available, need to try again
             } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 MediaFormat newFormat = audioEncoder.getOutputFormat();
-                if (!muxerStarted && audioTrackIndex == -1) {
+                if (mediaMuxer != null && !muxerStarted && audioTrackIndex == -1) {
                     cachedAudioFormat = newFormat;
                     audioTrackIndex = mediaMuxer.addTrack(newFormat);
                     if (videoTrackIndex != -1) {
@@ -1061,7 +1026,7 @@ public class GLRecordingPipeline {
             } else if (outputBufferIndex >= 0) {
                 ByteBuffer encodedData = audioEncoder.getOutputBuffer(outputBufferIndex);
                 
-                if (encodedData != null && bufferInfo.size > 0 && muxerStarted && audioTrackIndex != -1) {
+                if (encodedData != null && bufferInfo.size > 0 && mediaMuxer != null && muxerStarted && audioTrackIndex != -1) {
                     // Skip codec config data
                     if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
                         try {
@@ -1070,13 +1035,14 @@ public class GLRecordingPipeline {
                             // PTS is already contiguous — the audio thread subtracts
                             // totalPauseDurationNanos when computing ptsUs, so no
                             // additional correction is needed here.
-                            mediaMuxer.writeSampleData(audioTrackIndex, encodedData, bufferInfo);
+                            writeSampleToMuxer(audioTrackIndex, encodedData, bufferInfo);
                             
                             audioSamplesWritten++;
                             lastAudioPts = bufferInfo.presentationTimeUs;
                             // Per-sample logging removed — summary logged at EOS below
                         } catch (Exception e) {
                             FLog.e(TAG, "Error writing final audio frame", e);
+                                recordFailure("인코딩한 샘플을 파일에 쓰지 못했습니다.", e);
                         }
                     }
                 }
@@ -1096,17 +1062,27 @@ public class GLRecordingPipeline {
                 return false;
             }
         }
+        return false;
     }
 
     /**
      * Emergency finalization of MediaMuxer to ensure file is always playable.
      * Uses multiple fallback strategies if normal stop() fails.
      */
+    private void writeSampleToMuxer(int track, ByteBuffer data, MediaCodec.BufferInfo info) {
+        try {
+            mediaMuxer.writeSampleData(track, data, info);
+        } catch (RuntimeException failure) {
+            recordFailure("인코딩한 샘플을 파일에 쓰지 못했습니다.", failure);
+            throw failure;
+        }
+    }
+
     private void emergencyFinalizeMuxer() {
         try {
             mediaMuxer.stop();
         } catch (RuntimeException failure) {
-            recordingFailure = failure;
+            recordFailure("MP4 저장을 완료하지 못했습니다.", failure);
         } finally {
             mediaMuxer.release();
             mediaMuxer = null;
@@ -1436,14 +1412,6 @@ public class GLRecordingPipeline {
         // Reset track indices
         audioTrackIndex = -1;
         videoTrackIndex = -1;
-
-        // Only reset timestamps for very first segment; maintain monotonic PTS across segments
-        if (segmentNumber == 1) {
-            synchronized (timestampLock) {
-                recordingStartTimeNanos = -1;
-                recordingStartSystemTimeNanos = -1;
-            }
-        }
 
         // DO NOT start muxer here - wait for encoder formats to be available
         // This prevents the format change issue that causes muxer restarts
@@ -1796,7 +1764,7 @@ public class GLRecordingPipeline {
                                 // PTS is already contiguous — getSynchronizedVideoTimestamp() subtracts
                                 // totalPauseDurationNanos before feeding frames to the encoder, so no
                                 // additional correction is needed here.
-                                mediaMuxer.writeSampleData(videoTrackIndex, encodedData, bufferInfo);
+                                writeSampleToMuxer(videoTrackIndex, encodedData, bufferInfo);
                                 
                                 videoSamplesWritten++;
                                 if (videoSamplesWritten <= 5) {
@@ -1910,7 +1878,7 @@ public class GLRecordingPipeline {
                                     if (muxerStarted && videoTrackIndex != -1) {
                                         encodedData.position(bufferInfo.offset);
                                         encodedData.limit(bufferInfo.offset + bufferInfo.size);
-                                        mediaMuxer.writeSampleData(videoTrackIndex, encodedData, bufferInfo);
+                                        writeSampleToMuxer(videoTrackIndex, encodedData, bufferInfo);
                                         videoSamplesWritten++;
                                         lastVideoPts = bufferInfo.presentationTimeUs;
                                         segmentBytesWritten += bufferInfo.size;
@@ -1957,6 +1925,7 @@ public class GLRecordingPipeline {
             }
         } catch (Exception e) {
             FLog.e(TAG, "Error draining encoder", e);
+            recordFailure("영상 인코더 출력 처리에 실패했습니다.", e);
         }
     }
 
@@ -1971,11 +1940,12 @@ public class GLRecordingPipeline {
         FLog.d(TAG, "Flushing " + preMuxerVideoFrameBuffer.size() + " pre-muxer buffered video frames");
         for (PendingVideoFrame frame : preMuxerVideoFrameBuffer) {
             try {
-                mediaMuxer.writeSampleData(videoTrackIndex, frame.data, frame.info);
+                writeSampleToMuxer(videoTrackIndex, frame.data, frame.info);
                 videoSamplesWritten++;
                 lastVideoPts = frame.info.presentationTimeUs;
             } catch (Exception e) {
                 FLog.w(TAG, "Error writing buffered pre-muxer video frame", e);
+                                recordFailure("인코딩한 샘플을 파일에 쓰지 못했습니다.", e);
             }
         }
         preMuxerVideoFrameBuffer.clear();
@@ -2138,7 +2108,7 @@ public class GLRecordingPipeline {
             // The preceding segment is already finalized; STOP won before the next opened.
         } catch (Exception e) {
             FLog.e(TAG, "Error during segment rollover", e);
-            recordingFailure = new IllegalStateException("다음 녹화 파일을 준비하지 못했습니다.", e);
+            recordFailure("다음 녹화 파일을 준비하지 못했습니다.", e);
             isRecording = false;
             if (segmentCallback != null) segmentCallback.onOutputFailure();
         } finally {
@@ -2472,7 +2442,12 @@ public class GLRecordingPipeline {
         }
 
         if (wasPreviewOnly) {
-            quickReleaseForPreviewOnly();
+            if (renderThread != null && (Thread.currentThread() == renderThread
+                    || android.os.Looper.myLooper() == android.os.Looper.getMainLooper())) {
+                new Thread(this::quickReleaseForPreviewOnly, "PreviewRelease").start();
+            } else {
+                quickReleaseForPreviewOnly();
+            }
             FLog.d(TAG, "GLRecordingPipeline preview-only stopped and released.");
             return;
         }
@@ -2495,18 +2470,7 @@ public class GLRecordingPipeline {
         // This is the production-grade EOS-based drain that waits for actual EOS flags
         emergencyDrainEncoders();
 
-        // NOW stop render thread after encoders are fully drained
-        // No more video frames will be encoded after this
-        if (renderThread != null) {
-            try {
-                renderThread.quitSafely();
-                renderThread.join(300); // Wait for render thread to exit
-            } catch (InterruptedException e) {
-                FLog.w(TAG, "Interrupted while waiting for render thread to exit", e);
-                Thread.currentThread().interrupt();
-            }
-            renderThread = null;
-        }
+        stopRenderOwner();
 
         // Now stop and release the video encoder
         if (videoEncoder != null) {
@@ -2604,16 +2568,16 @@ public class GLRecordingPipeline {
         if (interrupted) Thread.currentThread().interrupt();
     }
 
+    private void stopRenderOwner() {
+        HandlerThread owner = renderThread;
+        if (owner == null) return;
+        owner.quitSafely();
+        awaitDrainOwner(owner);
+        renderThread = null;
+    }
+
     private void quickReleaseForPreviewOnly() {
-        if (renderThread != null) {
-            try {
-                renderThread.quitSafely();
-                renderThread.join(250);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            renderThread = null;
-        }
+        stopRenderOwner();
 
         if (videoEncoder != null) {
             try {
@@ -3120,7 +3084,8 @@ public class GLRecordingPipeline {
      */
     private void initAudioSettings() {
         com.fadcam.SharedPreferencesManager prefs = com.fadcam.SharedPreferencesManager.getInstance(context);
-        this.audioRecordingEnabled = prefs.isRecordAudioEnabled();
+        this.audioRecordingEnabled = audioEnabledForSession != null
+                ? audioEnabledForSession : prefs.isRecordAudioEnabled();
         this.audioBitrate = prefs.getAudioBitrate();
         this.audioSampleRate = prefs.getAudioSamplingRate();
         this.audioChannelCount = 2;
@@ -3253,6 +3218,7 @@ public class GLRecordingPipeline {
             // Recording is an input operation: leave music, Buds output and call routing alone.
         } catch (Exception e) {
             FLog.e(TAG, "Audio setup failed", e);
+            recordFailure("설정한 오디오 입력을 열지 못했습니다.", e);
             audioRecordingEnabled = false;
         }
     }
@@ -3274,7 +3240,9 @@ public class GLRecordingPipeline {
                 final int aacFrameSize = 1024 * bytesPerFrame; // 1024 PCM frames per AAC frame
                 final int readBufferSize = Math.max(aacFrameSize * 4, 131072); // >= 128 KiB
                 byte[] readBuffer = new byte[readBufferSize];
-                long lastPtsUs = 0L;
+                long firstPcmPtsUs = -1L;
+                long framesQueued = 0L;
+                long lastPtsUs = -1L;
                 long lastInputEndPtsUs = 0L;
                 
                 while (audioThreadRunning) {
@@ -3302,6 +3270,14 @@ public class GLRecordingPipeline {
                     
                     int read = audioRecord.read(readBuffer, 0, readBuffer.length);
                     if (read > 0) {
+                        read -= read % bytesPerFrame;
+                        if (read == 0) continue;
+                        if (firstPcmPtsUs < 0) {
+                            synchronized (timestampLock) {
+                                long readDurationUs = (read / bytesPerFrame) * 1_000_000L / audioSampleRate;
+                                firstPcmPtsUs = Math.max(0L, elapsedCaptureUsLocked() - readDurationUs);
+                            }
+                        }
                         if (audioMuted) {
                             // Realtime mute: encode silence (track stays continuous).
                             java.util.Arrays.fill(readBuffer, 0, read, (byte) 0);
@@ -3319,25 +3295,21 @@ public class GLRecordingPipeline {
                             }
                             codecInput.clear();
                             int toCopy = Math.min(codecInput.remaining(), read - offset);
-                            codecInput.put(readBuffer, offset, toCopy);
-                            
-                            // CRITICAL FIX: Audio PTS must sync with video PTS!
-                            // Both use elapsed time from recordingStartSystemTimeNanos reference point
-                            // This ensures they use the SAME timing base (system clock, not frame count)
-                            synchronized (timestampLock) {
-                                long elapsedNanos = System.nanoTime() - recordingStartSystemTimeNanos - totalPauseDurationNanos;
-                                long ptsUs = Math.max(0, elapsedNanos / 1000L); // Convert to microseconds
-                                
-                                // Ensure monotonically increasing PTS
-                                if (ptsUs <= lastPtsUs && lastPtsUs > 0) {
-                                    ptsUs = lastPtsUs + 1; // Ensure at least 1us increment
-                                }
-                                
-                                audioEncoder.queueInputBuffer(inputBufferIndex, 0, toCopy, ptsUs, 0);
-                                lastPtsUs = ptsUs;
-                                lastInputEndPtsUs = ptsUs + (toCopy / bytesPerFrame) * 1_000_000L / audioSampleRate;
+                            toCopy -= toCopy % bytesPerFrame;
+                            if (toCopy == 0) {
+                                audioEncoder.queueInputBuffer(inputBufferIndex, 0, 0,
+                                        Math.max(0L, lastPtsUs), 0);
+                                recordFailure("오디오 인코더에 PCM 한 프레임을 넣지 못했습니다.", null);
+                                break;
                             }
-                            
+                            codecInput.put(readBuffer, offset, toCopy);
+                            long ptsUs = firstPcmPtsUs + framesQueued * 1_000_000L / audioSampleRate;
+                            ptsUs = Math.max(ptsUs, lastPtsUs + 1L);
+                            audioEncoder.queueInputBuffer(inputBufferIndex, 0, toCopy, ptsUs, 0);
+                            lastPtsUs = ptsUs;
+                            framesQueued += toCopy / bytesPerFrame;
+                            lastInputEndPtsUs = firstPcmPtsUs + framesQueued * 1_000_000L / audioSampleRate;
+
                             // Advance counters
                             offset += toCopy;
                         }
@@ -3375,10 +3347,11 @@ public class GLRecordingPipeline {
                     }
                 }
                 if (!eosQueued) {
-                    FLog.e(TAG, "CRITICAL: Failed to queue audio EOS - file duration may be incorrect!");
+                    recordFailure("오디오 종료 신호를 인코더에 넣지 못했습니다.", null);
                 }
             } catch (Exception e) {
                 FLog.e(TAG, "Audio thread error", e);
+                recordFailure("오디오 입력 처리에 실패했습니다.", e);
             }
             // NOTE: Do NOT stop/release audioRecord here - let stopRecording() handle it
             // This prevents race conditions and ensures proper cleanup order
@@ -3499,7 +3472,7 @@ public class GLRecordingPipeline {
                                 // PTS is already contiguous — the audio thread subtracts
                                 // totalPauseDurationNanos when computing ptsUs, so no
                                 // additional correction is needed here.
-                                mediaMuxer.writeSampleData(audioTrackIndex, encodedData, bufferInfo);
+                                writeSampleToMuxer(audioTrackIndex, encodedData, bufferInfo);
                                 
                                 audioSamplesWritten++;
                                 lastAudioPts = bufferInfo.presentationTimeUs;
@@ -3511,6 +3484,7 @@ public class GLRecordingPipeline {
                                 }
                             } catch (Exception e) {
                                 FLog.e(TAG, "Error writing audio frame to muxer", e);
+                                recordFailure("인코딩한 샘플을 파일에 쓰지 못했습니다.", e);
                                 // Continue processing other frames
                             }
                         }
@@ -3529,6 +3503,7 @@ public class GLRecordingPipeline {
             }
         } catch (Exception e) {
             FLog.e(TAG, "Error draining audio encoder", e);
+            recordFailure("오디오 인코더 출력 처리에 실패했습니다.", e);
         }
     }
 

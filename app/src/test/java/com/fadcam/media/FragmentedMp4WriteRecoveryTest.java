@@ -75,13 +75,102 @@ public class FragmentedMp4WriteRecoveryTest {
                 "writeSegmentWithRecovery", byte[].class, boolean.class);
         append.setAccessible(true);
         try {
+            set(wrapper, "videoTrackIndex", 0);
             append.invoke(wrapper, new byte[] {1,2,3,4}, true);
-            append.invoke(wrapper, new byte[] {5,6,7,8}, false);
-            assertArrayEquals(new byte[] {1,2,3,4,5,6,7,8}, Files.readAllBytes(destination.toPath()));
+            byte[] valid = fixtureFragment(4);
+            append.invoke(wrapper, valid, false);
+            assertArrayEquals(ByteBuffer.allocate(4 + valid.length)
+                    .put(new byte[] {1,2,3,4}).put(valid).array(), Files.readAllBytes(destination.toPath()));
             assertEquals(3, writes.get());
         } finally {
             wrapper.release();
         }
+    }
+
+    @Test public void mismatchedTrunSizeNeverAppendsCorruptFragmentOrHidesItsFailure() throws Exception {
+        File destination = folder.newFile();
+        FragmentedMp4MuxerWrapper wrapper = new FragmentedMp4MuxerWrapper(destination.getPath());
+        Method append = FragmentedMp4MuxerWrapper.class.getDeclaredMethod(
+                "writeSegmentWithRecovery", byte[].class, boolean.class);
+        append.setAccessible(true);
+        try {
+            set(wrapper, "videoTrackIndex", 0);
+            byte[] original = {1, 2, 3, 4};
+            append.invoke(wrapper, original, true);
+            InvocationTargetException failure = assertThrows(InvocationTargetException.class,
+                    () -> append.invoke(wrapper, fixtureFragment(5), false));
+            assertTrue(failure.getCause() instanceof IOException);
+            assertArrayEquals(original, Files.readAllBytes(destination.toPath()));
+            wrapper.start();
+            IllegalStateException saveFailure = assertThrows(IllegalStateException.class, wrapper::stop);
+            assertSame(failure.getCause(), saveFailure.getCause());
+        } finally {
+            wrapper.release();
+        }
+    }
+
+    @Test public void realPatchedWriterKeepsGeneratedTrunAndFinalStszInAgreement() throws Exception {
+        File destination = folder.newFile();
+        FragmentedMp4MuxerWrapper wrapper = new FragmentedMp4MuxerWrapper(destination.getPath());
+        int[] sizes = {4, 5, 6};
+        try {
+            android.media.MediaFormat format = android.media.MediaFormat.createAudioFormat(
+                    android.media.MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2);
+            format.setByteBuffer("csd-0", ByteBuffer.wrap(new byte[]{0x11, (byte) 0x90}));
+            int track = wrapper.addTrack(format);
+            wrapper.start();
+            for (int i = 0; i < sizes.length; i++) {
+                android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+                info.set(0, sizes[i], i * 21_333L, 0);
+                wrapper.writeSampleData(track, ByteBuffer.wrap(new byte[sizes[i]]), info);
+            }
+            wrapper.stop();
+        } finally {
+            wrapper.release();
+        }
+        ByteBuffer mp4 = ByteBuffer.wrap(Files.readAllBytes(destination.toPath()));
+        int mdat = mp4.getInt(0);
+        assertEquals(0x6d646174, mp4.getInt(mdat + 4));
+        int finalMoov = (int) (mdat + mp4.getLong(mdat + 8));
+        assertEquals(0x6d6f6f76, mp4.getInt(finalMoov + 4));
+        int stsz = child(mp4, finalMoov, 0x7472616b, 0x6d646961, 0x6d696e66, 0x7374626c, 0x7374737a);
+        assertEquals(0, mp4.getInt(stsz + 12));
+        assertEquals(sizes.length, mp4.getInt(stsz + 16));
+        for (int i = 0; i < sizes.length; i++) assertEquals(sizes[i], mp4.getInt(stsz + 20 + 4 * i));
+        int initMoov = mdat + 16;
+        assertEquals(0x6d6f6f76, mp4.getInt(initMoov + 4));
+        int moof = initMoov + mp4.getInt(initMoov);
+        assertEquals(0x6d6f6f66, mp4.getInt(moof + 4));
+        int trun = child(mp4, moof, 0x74726166, 0x7472756e);
+        assertEquals(sizes.length, mp4.getInt(trun + 12));
+        for (int i = 0; i < sizes.length; i++) assertEquals(sizes[i], mp4.getInt(trun + 24 + 12 * i));
+    }
+
+    private static int child(ByteBuffer mp4, int parent, int... types) {
+        for (int type : types) {
+            int end = parent + mp4.getInt(parent);
+            int pos = parent + 8;
+            while (pos + 8 <= end && mp4.getInt(pos + 4) != type) {
+                int size = mp4.getInt(pos);
+                assertTrue(size >= 8 && size <= end - pos);
+                pos += size;
+            }
+            assertTrue("missing box: " + Integer.toHexString(type), pos + 8 <= end);
+            parent = pos;
+        }
+        return parent;
+    }
+
+    private static byte[] fixtureFragment(int declaredSampleSize) {
+        ByteBuffer fragment = ByteBuffer.allocate(92);
+        fragment.putInt(80).putInt(0x6d6f6f66); // moof
+        fragment.putInt(16).putInt(0x6d666864).putInt(0).putInt(1); // mfhd
+        fragment.putInt(56).putInt(0x74726166); // traf
+        fragment.putInt(16).putInt(0x74666864).putInt(0).putInt(1); // tfhd
+        fragment.putInt(32).putInt(0x7472756e).putInt(0x01000701).putInt(1).putInt(88);
+        fragment.putInt(10).putInt(declaredSampleSize).putInt(0);
+        fragment.putInt(12).putInt(0x6d646174).putInt(0x05060708); // mdat
+        return fragment.array();
     }
 
     @Test public void releaseClosesActualUnstartedPatchedWriterExactlyOnce() throws Exception {

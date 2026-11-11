@@ -242,7 +242,11 @@ public final class PlayerHolder {
                     java.util.concurrent.TimeUnit.MILLISECONDS,
                     new java.util.concurrent.ArrayBlockingQueue<>(1),
                     new java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy());
+    private static final long INDEX_PREPARATION_BUDGET_MS = 1_500L;
     private long preparationGeneration;
+    private java.util.concurrent.Future<?> pendingPreparation;
+    private android.os.Handler pendingPreparationHandler;
+    private Runnable pendingPreparationDeadline;
     private Uri preparedUri;
 
     public void setMediaIfNeeded(Uri uri) {
@@ -269,7 +273,7 @@ public final class PlayerHolder {
         MediaItem item = new MediaItem.Builder().setUri(uri)
                 .setMediaMetadata(new MediaMetadata.Builder().setTitle(title).build()).build();
         long generation = ++preparationGeneration;
-        preparationExecutor.getQueue().clear();
+        finishPreparation(true);
         currentUri = uri;
         // Install the correct item immediately so initial seek/play commands target it.
         // The indexed source replaces it once ready, carrying forward the current intent.
@@ -284,37 +288,67 @@ public final class PlayerHolder {
             return;
         }
         boolean alreadyPrepared = uri.equals(preparedUri);
-        preparationExecutor.execute(() -> {
-            MediaSource prepared;
+        pendingPreparationHandler = handler;
+        pendingPreparationDeadline = () -> completePreparation(
+                owner, generation, uri, ownerIsCurrent, null, alreadyPrepared, true);
+        handler.postDelayed(pendingPreparationDeadline, INDEX_PREPARATION_BUDGET_MS);
+        pendingPreparation = preparationExecutor.submit(() -> {
+            MediaSource prepared = null;
+            boolean skip = false;
             try {
-                if (alreadyPrepared && !factory.isFragmentedMp4(uri)) return;
-                prepared = factory.createMediaSource(item);
+                skip = alreadyPrepared && !factory.isFragmentedMp4(uri);
+                if (!skip && !Thread.currentThread().isInterrupted()) {
+                    prepared = factory.createMediaSource(item);
+                }
             } catch (RuntimeException e) {
                 FLog.w(TAG, "Failed to prepare indexed playback source", e);
-                handler.post(() -> applyPreparedSource(owner, generation, uri, ownerIsCurrent, null));
-                return;
             }
-            handler.post(() -> applyPreparedSource(owner, generation, uri, ownerIsCurrent, prepared));
+            final MediaSource result = prepared;
+            final boolean skipReplacement = skip;
+            handler.post(() -> completePreparation(
+                    owner, generation, uri, ownerIsCurrent, result, skipReplacement, false));
         });
     }
 
-    private synchronized void applyPreparedSource(ExoPlayer owner, long generation, Uri uri,
-            java.util.function.BooleanSupplier ownerIsCurrent, MediaSource source) {
-        if (player != owner || generation != preparationGeneration || !uri.equals(currentUri)
-                || !ownerIsCurrent.getAsBoolean()) return;
+    private void finishPreparation(boolean cancel) {
+        if (pendingPreparationHandler != null && pendingPreparationDeadline != null) {
+            pendingPreparationHandler.removeCallbacks(pendingPreparationDeadline);
+        }
+        if (cancel && pendingPreparation != null) {
+            // Queued tasks are removed and running providers get a best-effort interrupt.
+            pendingPreparation.cancel(true);
+            preparationExecutor.purge();
+        }
+        pendingPreparation = null;
+        pendingPreparationHandler = null;
+        pendingPreparationDeadline = null;
+    }
+
+    private synchronized void completePreparation(ExoPlayer owner, long generation, Uri uri,
+            java.util.function.BooleanSupplier ownerIsCurrent, MediaSource source, boolean skip, boolean timedOut) {
+        if (player != owner || generation != preparationGeneration || !uri.equals(currentUri)) return;
+        // Retire this request before touching the player; a late provider result is no longer eligible.
+        long retiredGeneration = ++preparationGeneration;
+        finishPreparation(timedOut);
+        if (!ownerIsCurrent.getAsBoolean() || skip) return;
         long position = owner.getCurrentPosition();
         boolean playWhenReady = owner.getPlayWhenReady();
         if (source != null) owner.setMediaSource(source, position);
-        owner.prepare();
+        if (retiredGeneration != preparationGeneration || player != owner || !ownerIsCurrent.getAsBoolean()) return;
         preparedUri = uri;
-        owner.setPlayWhenReady(playWhenReady);
+        // On deadline, the original MediaItem already installed above prepares on Media3's loader.
+        // This cannot be held behind two uncooperative index jobs.
+        owner.prepare();
+        if (retiredGeneration == preparationGeneration && player == owner && ownerIsCurrent.getAsBoolean()) {
+            owner.setPlayWhenReady(playWhenReady);
+        }
     }
 
     public synchronized Uri getCurrentUri() { return currentUri; }
 
     /**
      * Performs a seek operation optimized for fragmented MP4 files.
-     * Uses ClippingMediaSource with known duration for reliable seeking.
+     * Uses the prepared source's seek map when one is available.
      * 
      * @param positionMs Position to seek to in milliseconds
      */
@@ -343,7 +377,7 @@ public final class PlayerHolder {
     public synchronized void release() {
         preparationGeneration++;
         preparedUri = null;
-        preparationExecutor.getQueue().clear();
+        finishPreparation(true);
         if (player != null) {
             try { player.release(); } catch (Exception ignored) {}
             player = null;

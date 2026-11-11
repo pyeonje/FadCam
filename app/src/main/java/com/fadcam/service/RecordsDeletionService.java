@@ -47,6 +47,7 @@ public class RecordsDeletionService extends Service {
     public static final String EXTRA_CUSTOM_TREE_URI = "custom_tree_uri";
 
     private static final String EXTRA_REQUEST_ID = "request_id";
+    private static final String EXTRA_EXPORT_ACCEPTANCE = "export_acceptance";
 
     private final AtomicBoolean processing = new AtomicBoolean(false);
     private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
@@ -104,8 +105,11 @@ public class RecordsDeletionService extends Service {
         String customTreeUri = intent.getStringExtra(EXTRA_CUSTOM_TREE_URI);
 
         String requestId = intent.getStringExtra(EXTRA_REQUEST_ID);
-        if (!sessionStore.alreadyAccepted(requestId)) {
-            startOrReplaceSession(items, operationKind, customTreeUri, requestId);
+        boolean accepted = sessionStore.alreadyAccepted(requestId)
+                || startOrReplaceSession(items, operationKind, customTreeUri, requestId);
+        android.os.ResultReceiver reply = intent.getParcelableExtra(EXTRA_EXPORT_ACCEPTANCE);
+        if (reply != null) {
+            reply.send(accepted ? android.app.Activity.RESULT_OK : android.app.Activity.RESULT_CANCELED, null);
         }
 
         maybeResumeProcessing(startId);
@@ -158,13 +162,13 @@ public class RecordsDeletionService extends Service {
     public static boolean startExportSession(
             @NonNull android.content.Context context,
             @NonNull List<RecordsDeletionRequestItem> items,
-            @NonNull android.net.Uri customTreeUri
+            @NonNull android.net.Uri customTreeUri, @NonNull android.os.ResultReceiver reply
     ) {
         return startSession(
                 context,
                 items,
                 RecordsDeletionSessionSnapshot.OperationKind.SAVE_EXPORT_TO_CUSTOM_TREE,
-                customTreeUri.toString()
+                customTreeUri.toString(), reply
         );
     }
 
@@ -174,6 +178,12 @@ public class RecordsDeletionService extends Service {
             @NonNull RecordsDeletionSessionSnapshot.OperationKind operationKind,
             @Nullable String customTreeUri
     ) {
+        return startSession(context, items, operationKind, customTreeUri, null);
+    }
+
+    private static boolean startSession(android.content.Context context, List<RecordsDeletionRequestItem> items,
+            RecordsDeletionSessionSnapshot.OperationKind operationKind, @Nullable String customTreeUri,
+            @Nullable android.os.ResultReceiver reply) {
         String action = ACTION_START_DELETE_SESSION;
         RecordsDeletionSessionSnapshot snapshot = new RecordsDeletionSessionStore(context).read();
         if (snapshot != null && snapshot.isActive()) {
@@ -185,6 +195,7 @@ public class RecordsDeletionService extends Service {
         intent.putExtra(EXTRA_REQUEST_ID, java.util.UUID.randomUUID().toString());
         intent.putExtra(EXTRA_DELETE_ITEMS_JSON, RecordsDeletionRequestItem.toJson(items));
         intent.putExtra(EXTRA_OPERATION_KIND, operationKind.name());
+        if (reply != null) intent.putExtra(EXTRA_EXPORT_ACCEPTANCE, reply);
         if (customTreeUri != null) {
             intent.putExtra(EXTRA_CUSTOM_TREE_URI, customTreeUri);
         }
@@ -212,30 +223,32 @@ public class RecordsDeletionService extends Service {
         context.startService(intent);
     }
 
-    private void startOrReplaceSession(
+    private boolean startOrReplaceSession(
             @NonNull List<RecordsDeletionRequestItem> items,
             @NonNull RecordsDeletionSessionSnapshot.OperationKind operationKind,
             @Nullable String customTreeUri, @Nullable String requestId
     ) {
         if (items.isEmpty()) {
-            return;
+            return false;
         }
         RecordsDeletionSessionSnapshot existing = sessionStore.read();
         if (existing != null && existing.isActive()) {
             if (!existing.accepts(operationKind, customTreeUri)) {
-                android.widget.Toast.makeText(this, R.string.records_operation_busy, android.widget.Toast.LENGTH_SHORT).show();
-                return;
+                return false;
             }
             existing.appendItems(items);
-            if (sessionStore.write(existing, requestId)) publishSnapshot(existing, false, false, false);
-            return;
+            if (!sessionStore.write(existing, requestId)) return false;
+            publishSnapshot(existing, false, false, false);
+            return true;
         }
         cancelRequested.set(false);
         RecordsDeletionSessionSnapshot snapshot = RecordsDeletionSessionSnapshot.create(items, operationKind);
         if (customTreeUri != null) {
             snapshot.customTreeUri = customTreeUri;
         }
-        if (sessionStore.write(snapshot, requestId)) publishSnapshot(snapshot, false, false, false);
+        if (!sessionStore.write(snapshot, requestId)) return false;
+        publishSnapshot(snapshot, false, false, false);
+        return true;
     }
 
     private void maybeResumeProcessing(int startId) {
@@ -285,10 +298,20 @@ public class RecordsDeletionService extends Service {
     private void reconcileInterruptedClaim(RecordsDeletionSessionSnapshot snapshot) {
         if (snapshot.inFlight == null) return;
         if (snapshot.inFlightOutputUri != null && snapshot.inFlightVerifiedBytes != null
+                && snapshot.inFlightVerifiedDigest != null
                 && snapshot.operationKind == RecordsDeletionSessionSnapshot.OperationKind.SAVE_EXPORT_TO_CUSTOM_TREE
-                && snapshot.inFlightVerifiedBytes.equals(queryExportSize(Uri.parse(snapshot.inFlightOutputUri)))) {
-            snapshot.finishRecoveredOperation(snapshot.inFlightVerifiedBytes);
-            return;
+                ) {
+            try {
+                if (com.fadcam.utils.CopyIntegrity.matches(
+                        getContentResolver().openInputStream(Uri.parse(snapshot.inFlightOutputUri)),
+                        snapshot.inFlightVerifiedBytes, android.util.Base64.decode(snapshot.inFlightVerifiedDigest,
+                                android.util.Base64.NO_WRAP))) {
+                    snapshot.finishRecoveredOperation(snapshot.inFlightVerifiedBytes);
+                    return;
+                }
+            } catch (java.io.IOException | RuntimeException e) {
+                FLog.w(TAG, "이전 내보내기 사본을 다시 검증하지 못했습니다.", e);
+            }
         }
         Uri original = snapshot.inFlight.toUri();
         if (snapshot.operationKind == RecordsDeletionSessionSnapshot.OperationKind.DELETE
@@ -339,13 +362,14 @@ public class RecordsDeletionService extends Service {
                             latest.inFlight = null;
                             latest.inFlightOutputUri = null;
                             latest.inFlightVerifiedBytes = null;
+                            latest.inFlightVerifiedDigest = null;
                             latest.inFlightStartedAtMs = 0;
                             if (result.success) {
                                 latest.completedItemCount++;
                                 latest.processedBytes += result.item.sizeBytes;
                                 latest.completedUriStrings.add(result.item.uriString);
                                 latest.lastUpdatedAtMs = System.currentTimeMillis();
-                                sessionStore.write(latest);
+                                if (!persistOrSuspend(latest)) return;
 
                                 // Remove from index if deletion was successful
                                 if (snapshot.operationKind == RecordsDeletionSessionSnapshot.OperationKind.DELETE
@@ -361,13 +385,14 @@ public class RecordsDeletionService extends Service {
                                 publishSnapshot(latest, true, false, false);
                             } else if (latest.cancellationRequested && result.cancelled) {
                                 latest.cancelledItemCount++;
+                                if (!persistOrSuspend(latest)) return;
                             } else {
                                 latest.failedItemCount++;
                                 latest.failedUriStrings.add(result.item.uriString);
                                 latest.errorSummaries.add(result.errorMessage != null
                                         ? result.errorMessage : getString(R.string.generic_save_failed));
                                 latest.lastUpdatedAtMs = System.currentTimeMillis();
-                                sessionStore.write(latest);
+                                if (!persistOrSuspend(latest)) return;
                                 publishSnapshot(latest, false, false, false);
                             }
 
@@ -380,6 +405,8 @@ public class RecordsDeletionService extends Service {
                             }
                         }
                     }
+                } catch (JournalWriteException e) {
+                    synchronized (this) { suspendAfterJournalFailure(); }
                 } catch (Exception e) {
                     FLog.e(TAG, "Error processing item " + item.displayName, e);
                     synchronized (this) {
@@ -389,12 +416,13 @@ public class RecordsDeletionService extends Service {
                             if (latest.inFlightOutputUri != null) latest.residualOutputUris.add(latest.inFlightOutputUri);
                             latest.inFlightOutputUri = null;
                             latest.inFlightVerifiedBytes = null;
+                            latest.inFlightVerifiedDigest = null;
                             latest.inFlightStartedAtMs = 0;
                             latest.failedItemCount++;
                             latest.failedUriStrings.add(item.uriString);
                             latest.errorSummaries.add(getString(R.string.generic_save_failed));
                             latest.lastUpdatedAtMs = System.currentTimeMillis();
-                            sessionStore.write(latest);
+                            if (!persistOrSuspend(latest)) return;
                             publishSnapshot(latest, false, false, false);
 
                             // Continue processing remaining items if not cancelled and executor not shutting down
@@ -453,6 +481,8 @@ public class RecordsDeletionService extends Service {
                         snapshot.operationKind == RecordsDeletionSessionSnapshot.OperationKind.SAVE_MOVE_TO_GALLERY);
                 return new ProcessResult(item, success, success ? null : getString(R.string.generic_save_failed));
             }
+        } catch (JournalWriteException e) {
+            throw e;
         } catch (Exception e) {
             ProcessResult result = new ProcessResult(item, false, getString(R.string.generic_save_failed));
             result.cancelled = e instanceof java.util.concurrent.CancellationException
@@ -592,6 +622,9 @@ public class RecordsDeletionService extends Service {
         androidx.documentfile.provider.DocumentFile targetFile = null;
         boolean complete = false;
         try {
+            Long sourceSize = queryExportSize(sourceUri);
+            // A destination that agrees with bytes read cannot prove EOF was not premature.
+            if (sourceSize == null) return false;
             Uri treeUri = Uri.parse(customTreeUriString);
             androidx.documentfile.provider.DocumentFile targetDir =
                     androidx.documentfile.provider.DocumentFile.fromTreeUri(this, treeUri);
@@ -600,17 +633,25 @@ public class RecordsDeletionService extends Service {
             targetFile = createUniqueSafFile(targetDir, item.displayName);
             if (targetFile == null) return false;
             Uri output = targetFile.getUri();
-            if (!recordExportOutput(snapshot.sessionId, output, false, null)) return false;
-            Long sourceSize = queryExportSize(sourceUri);
-            long expected = sourceSize != null ? sourceSize : item.sizeBytes > 0 ? item.sizeBytes : -1;
+            if (!recordExportOutput(snapshot.sessionId, output, false, null, null)) return false;
+            java.security.MessageDigest digest = com.fadcam.utils.CopyIntegrity.sha256();
             long copied = copyExportPayload(
-                    () -> getContentResolver().openInputStream(sourceUri),
+                    () -> {
+                        InputStream input = getContentResolver().openInputStream(sourceUri);
+                        return input == null ? null : new java.security.DigestInputStream(input, digest);
+                    },
                     () -> getContentResolver().openOutputStream(output, "w"), cancelRequested::get);
             Long outputSize = queryExportSize(output);
-            if (!verifiedExportSize(expected, copied, outputSize)) return false;
+            byte[] expectedDigest = digest.digest();
+            if (!verifiedExportSize(sourceSize, copied, outputSize)
+                    || !com.fadcam.utils.CopyIntegrity.matches(getContentResolver().openInputStream(output),
+                    copied, expectedDigest)) return false;
             GalleryMediaPublisher.checkCancelled(cancelRequested::get);
-            complete = recordExportOutput(snapshot.sessionId, output, false, copied);
-            return complete;
+            complete = true; // Preserve this verified file even if the journal is temporarily unavailable.
+            if (!recordExportOutput(snapshot.sessionId, output, false, copied, expectedDigest)) throw new JournalWriteException();
+            return true;
+        } catch (JournalWriteException e) {
+            throw e;
         } catch (android.os.OperationCanceledException | java.util.concurrent.CancellationException e) {
             complete = false;
             throw e;
@@ -623,13 +664,15 @@ public class RecordsDeletionService extends Service {
                 boolean removed = false;
                 try { removed = targetFile.delete(); }
                 catch (RuntimeException e) { FLog.w(TAG, "불완전한 사본을 정리하지 못했습니다.", e); }
-                recordExportOutput(snapshot.sessionId, removed ? null : targetFile.getUri(), !removed, null);
+                if (!recordExportOutput(snapshot.sessionId, removed ? null : targetFile.getUri(), !removed, null, null)) {
+                    throw new JournalWriteException();
+                }
             }
         }
     }
 
     static boolean verifiedExportSize(long expected, long copied, @Nullable Long stored) {
-        return (expected < 0 || expected == copied) && (stored == null || stored == copied);
+        return expected >= 0 && expected == copied && (stored == null || stored == copied);
     }
 
     interface ExportStream<T> { T open() throws java.io.IOException; }
@@ -660,11 +703,13 @@ public class RecordsDeletionService extends Service {
     }
 
     private synchronized boolean recordExportOutput(String sessionId, @Nullable Uri uri, boolean residual,
-            @Nullable Long verifiedBytes) {
+            @Nullable Long verifiedBytes, @Nullable byte[] verifiedDigest) {
         RecordsDeletionSessionSnapshot latest = sessionStore.read();
         if (latest == null || !sessionId.equals(latest.sessionId) || latest.inFlight == null) return false;
         latest.inFlightOutputUri = uri == null ? null : uri.toString();
         latest.inFlightVerifiedBytes = verifiedBytes;
+        latest.inFlightVerifiedDigest = verifiedDigest == null ? null
+                : android.util.Base64.encodeToString(verifiedDigest, android.util.Base64.NO_WRAP);
         if (residual && uri != null) {
             latest.residualOutputUris.add(uri.toString());
             latest.errorSummaries.add("불완전한 내보내기 사본이 남았습니다. 저장 위치를 확인하세요.");
@@ -709,7 +754,7 @@ public class RecordsDeletionService extends Service {
         snapshot.failedUriStrings.add(item.uriString);
         snapshot.errorSummaries.add(error);
         snapshot.lastUpdatedAtMs = System.currentTimeMillis();
-        sessionStore.write(snapshot);
+        if (!persistOrSuspend(snapshot)) return;
         publishSnapshot(snapshot, false, false, false);
     }
 
@@ -730,7 +775,7 @@ public class RecordsDeletionService extends Service {
         } else {
             snapshot.state = RecordsDeletionSessionSnapshot.State.COMPLETED_SUCCESS;
         }
-        sessionStore.write(snapshot);
+        if (!persistOrSuspend(snapshot)) return;
         publishSnapshot(snapshot, false, true, true);
         notificationManager.cancelProgress();
         notificationManager.showCompletion(snapshot);
@@ -751,7 +796,7 @@ public class RecordsDeletionService extends Service {
         snapshot.lastUpdatedAtMs = snapshot.finishedAtMs;
         snapshot.unprocessedItemCount = snapshot.pendingItems.size();
         snapshot.state = RecordsDeletionSessionSnapshot.State.CANCELLED;
-        sessionStore.write(snapshot);
+        if (!persistOrSuspend(snapshot)) return;
         publishSnapshot(snapshot, false, true, true);
         notificationManager.cancelProgress();
         notificationManager.showCompletion(snapshot);
@@ -768,10 +813,35 @@ public class RecordsDeletionService extends Service {
             return;
         }
         snapshot.completionAcknowledged = true;
-        sessionStore.clear();
+        if (!sessionStore.clear()) {
+            notifyJournalFailure();
+            return;
+        }
         notificationManager.cancelProgress();
         notificationManager.cancelCompletion();
         publishSnapshot(snapshot, false, false, true);
+    }
+
+    private static final class JournalWriteException extends RuntimeException {}
+
+    private boolean persistOrSuspend(RecordsDeletionSessionSnapshot snapshot) {
+        if (sessionStore.write(snapshot)) return true;
+        suspendAfterJournalFailure();
+        return false;
+    }
+
+    private void suspendAfterJournalFailure() {
+        processing.set(false);
+        notificationManager.cancelProgress();
+        com.fadcam.Utils.stopForegroundCompat(this, true);
+        stopSelfResult(currentStartId);
+        notifyJournalFailure();
+    }
+
+    private void notifyJournalFailure() {
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                android.widget.Toast.makeText(getApplicationContext(), R.string.records_journal_recovery_required,
+                        android.widget.Toast.LENGTH_LONG).show());
     }
 
     private void requestCancellation(@Nullable String sessionId) {
@@ -782,10 +852,10 @@ public class RecordsDeletionService extends Service {
         if (sessionId != null && !sessionId.equals(snapshot.sessionId)) {
             return;
         }
-        cancelRequested.set(true);
         snapshot.cancellationRequested = true;
         snapshot.lastUpdatedAtMs = System.currentTimeMillis();
-        sessionStore.write(snapshot);
+        if (sessionStore.write(snapshot)) cancelRequested.set(true);
+        else notifyJournalFailure();
     }
 
     @Nullable

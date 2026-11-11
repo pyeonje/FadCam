@@ -2,18 +2,15 @@ package com.fadcam.playback;
 
 import com.fadcam.FLog;
 import android.content.Context;
-import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.OptIn;
-import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.FileDataSource;
-import androidx.media3.exoplayer.source.ClippingMediaSource;
 import androidx.media3.exoplayer.source.MediaSource;
 import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 import androidx.media3.extractor.ChunkIndex;
@@ -68,10 +65,8 @@ public class SeekableFragmentedMp4MediaSourceFactory {
      *
      * <p>For {@code file://} URIs, builds a full fragment index using
      * {@link FragmentedMp4IndexBuilder} for precise seeking. For {@code content://} URIs
-     * (SAF / custom storage), uses a {@link ClippingMediaSource} with the duration
-     * obtained from {@link MediaMetadataRetriever}, because
-     * {@link FragmentedMp4IndexBuilder} requires {@link java.io.RandomAccessFile} which
-     * is unavailable for content URIs.
+     * (SAF / custom storage), reads the index from the provider if it supports seeks.
+     * If not, use progressive playback and let the extractor consume the available bytes.
      *
      * @param mediaItem The MediaItem to create a source for.
      * @return A MediaSource with proper seeking for fMP4 files.
@@ -88,8 +83,6 @@ public class SeekableFragmentedMp4MediaSourceFactory {
         String scheme = uri.getScheme();
 
         if ("content".equals(scheme)) {
-            // For content:// URIs, use ClippingMediaSource approach since
-            // FragmentedMp4IndexBuilder requires RandomAccessFile (file:// only).
             return createContentUriMediaSource(mediaItem, uri);
         }
 
@@ -133,44 +126,21 @@ public class SeekableFragmentedMp4MediaSourceFactory {
                     .createMediaSource(mediaItem);
         }
 
-        // Fallback 2: For fMP4 without a file-level index, wrap with
-        // ClippingMediaSource.  For standard MP4 use the default extractor
-        // — Mp4Extractor provides a proper seek map natively.
-        FLog.d(TAG, "Could not build index, using fallback source");
-        boolean isFmp4 = isFragmentedMp4ContentUri(uri);
-        if (isFmp4) {
-            long durationUs = getDurationFromRetriever(uri);
-            DataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(context);
-            ExtractorsFactory extractorsFactory = () -> new Extractor[] {
-                new SeekMapInjectingExtractor(null)
-            };
-            MediaSource baseSource = new ProgressiveMediaSource.Factory(
-                    dataSourceFactory, extractorsFactory)
-                    .createMediaSource(mediaItem);
-            if (durationUs > 0) {
-                FLog.d(TAG, "Content URI fMP4: ClippingMediaSource duration=" +
-                      (durationUs / 1_000_000.0) + "s");
-                return new ClippingMediaSource.Builder(baseSource)
-                        .setStartPositionUs(0)
-                        .setEndPositionUs(durationUs)
-                        .build();
-            }
-            FLog.w(TAG, "Content URI fMP4: could not determine duration, using raw source");
-            return baseSource;
-        } else {
-            // Standard MP4: DefaultExtractorsFactory provides Mp4Extractor with
-            // native duration and seek map support.
-            FLog.d(TAG, "Standard MP4 fallback: using DefaultExtractorsFactory");
-            DataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(context);
-            return new ProgressiveMediaSource.Factory(dataSourceFactory)
+        // An unindexed recording can have a stale mvhd duration while its moof/mdat
+        // still contain valid samples. Never clip this source to metadata alone.
+        DataSource.Factory dataSource = new DefaultDataSource.Factory(context);
+        if (!Thread.currentThread().isInterrupted() && isFragmentedMp4ContentUri(uri)) {
+            return new ProgressiveMediaSource.Factory(dataSource,
+                    () -> new Extractor[] { new SeekMapInjectingExtractor(null) })
                     .createMediaSource(mediaItem);
         }
+        return new ProgressiveMediaSource.Factory(dataSource).createMediaSource(mediaItem);
     }
 
     @Nullable
     FragmentedMp4IndexBuilder.FragmentIndex scanContentIndex(Uri uri) {
         try (android.os.ParcelFileDescriptor pfd = openScanDescriptor(uri)) {
-            if (pfd == null) return null;
+            if (pfd == null || Thread.currentThread().isInterrupted()) return null;
             return scanDescriptor(pfd);
         } catch (Exception e) {
             FLog.w(TAG, "Provider does not support descriptor indexing", e);
@@ -184,38 +154,6 @@ public class SeekableFragmentedMp4MediaSourceFactory {
 
     FragmentedMp4IndexBuilder.FragmentIndex scanDescriptor(android.os.ParcelFileDescriptor pfd) {
         return indexBuilder.buildIndex(new File("/proc/self/fd/" + pfd.getFd()));
-    }
-
-    private long getDurationFromRetriever(@NonNull Uri uri) {
-        MediaMetadataRetriever retriever = null;
-        try {
-            retriever = new MediaMetadataRetriever();
-            String scheme = uri.getScheme();
-
-            if ("content".equals(scheme)) {
-                retriever.setDataSource(context, uri);
-            } else if ("file".equals(scheme)) {
-                retriever.setDataSource(uri.getPath());
-            } else {
-                retriever.setDataSource(uri.toString());
-            }
-            String durationStr = retriever.extractMetadata(
-                    MediaMetadataRetriever.METADATA_KEY_DURATION);
-            if (durationStr != null) {
-                long durationMs = Long.parseLong(durationStr);
-                long durationUs = durationMs * 1000;
-                FLog.d(TAG, "Retriever duration: " + durationMs + "ms for " +
-                      uri.getLastPathSegment());
-                return durationUs;
-            }
-        } catch (Exception e) {
-            FLog.w(TAG, "Error getting duration via Retriever for: " + uri, e);
-        } finally {
-            if (retriever != null) {
-                try { retriever.release(); } catch (Exception ignored) {}
-            }
-        }
-        return C.TIME_UNSET;
     }
 
     /**
@@ -268,7 +206,7 @@ public class SeekableFragmentedMp4MediaSourceFactory {
             // Read up to 1MB (enough to find ftyp near the start and the first moof)
             byte[] data = new byte[1024 * 1024];
             int totalRead = 0;
-            while (totalRead < data.length) {
+            while (totalRead < data.length && !Thread.currentThread().isInterrupted()) {
                 int n = is.read(data, totalRead, data.length - totalRead);
                 if (n <= 0) break;
                 totalRead += n;

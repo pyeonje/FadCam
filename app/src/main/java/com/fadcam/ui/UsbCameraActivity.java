@@ -6,7 +6,9 @@ import android.content.*;
 import android.content.pm.PackageManager;
 import android.graphics.*;
 import android.hardware.usb.*;
+import android.net.Uri;
 import android.os.*;
+import android.provider.DocumentsContract;
 import android.view.*;
 import android.widget.*;
 import androidx.activity.result.ActivityResultLauncher;
@@ -14,8 +16,16 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+import androidx.documentfile.provider.DocumentFile;
+import com.fadcam.Constants;
 import com.fadcam.R;
+import com.fadcam.SharedPreferencesManager;
+import com.fadcam.utils.RecordingStoragePaths;
 import com.mikimn.droiduvc.StreamMode;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -561,22 +571,16 @@ public class UsbCameraActivity extends AppCompatActivity implements TextureView.
         if(bitmap==null)return;
         savingPhoto=true;
         photo.setEnabled(false);
+        // Capture the selected tree at the shutter action, not later on the I/O worker.
+        String configuredTree=SharedPreferencesManager.getInstance(this).getCustomStorageUri();
         if(!postWorker(()->{
             boolean saved=false;
-            java.io.File file=null;
             try{
-                java.io.File external=getExternalFilesDir(null);
-                if(external==null)throw new java.io.IOException("No external output");
-                java.io.File folder=new java.io.File(external,"FadCam/Camera/USB");
-                if(!folder.isDirectory()&&!folder.mkdirs())throw new java.io.IOException("No output folder");
-                file=java.io.File.createTempFile("USB_",".jpg",folder);
-                try(java.io.FileOutputStream output=new java.io.FileOutputStream(file)){
-                    if(!bitmap.compress(Bitmap.CompressFormat.JPEG,95,output))throw new java.io.IOException("JPEG failed");
-                }
+                savePhotoBitmap(bitmap,configuredTree);
                 saved=true;
                 RecordsFragment.requestRefresh();
-            }catch(Exception failure){
-                if(file!=null)file.delete();
+            }catch(IOException|RuntimeException failure){
+                com.fadcam.FLog.w("UsbCameraActivity","Could not save USB preview JPEG",failure);
             }finally{bitmap.recycle();}
             final boolean done=saved;
             main.post(()->completePhoto(done));
@@ -584,6 +588,89 @@ public class UsbCameraActivity extends AppCompatActivity implements TextureView.
             bitmap.recycle();
             completePhoto(false);
         }
+    }
+
+    private Uri savePhotoBitmap(Bitmap bitmap,String configuredTree)throws IOException{
+        if(configuredTree!=null&&!configuredTree.isEmpty()){
+            Uri tree=Uri.parse(configuredTree);
+            // Match the gallery's selected source. A readable but unwritable tree cannot
+            // silently redirect to an internal file that this gallery would not scan.
+            for(UriPermission grant:getContentResolver().getPersistedUriPermissions()){
+                if(tree.equals(grant.getUri())&&grant.isReadPermission()){
+                    if(!grant.isWritePermission())throw new IOException("Selected photo tree is read-only");
+                    return savePhotoToTree(bitmap,configuredTree);
+                }
+            }
+        }
+        File camera=RecordingStoragePaths.getInternalCategoryDir(this,RecordingStoragePaths.Category.CAMERA,true);
+        if(camera==null)throw new IOException("No internal camera directory");
+        File folder=new File(camera,"USB");
+        if(!folder.isDirectory()&&!folder.mkdirs())throw new IOException("No USB photo directory");
+        File file=File.createTempFile("USB_",".jpg",folder);
+        try{
+            try(OutputStream output=new FileOutputStream(file)){writePhotoJpeg(bitmap,output);}
+            return Uri.fromFile(file);
+        }catch(IOException|RuntimeException failure){
+            file.delete(); // Only this shutter's incomplete file.
+            throw failure;
+        }
+    }
+
+    private Uri savePhotoToTree(Bitmap bitmap,String configuredTree)throws IOException{
+        DocumentFile root=RecordingStoragePaths.getSafBaseDir(this,configuredTree);
+        if(root==null)throw new IOException("Selected photo tree unavailable");
+        root=resolveIndexedSafRoot(root);
+        DocumentFile camera=RecordingStoragePaths.findOrCreateChildDirectory(root,Constants.RECORDING_SUBDIR_CAMERA,true);
+        if(camera==null)throw new IOException("No Camera directory in selected tree");
+        DocumentFile usb=RecordingStoragePaths.findOrCreateChildDirectory(camera,"USB",true);
+        if(usb==null)throw new IOException("No USB directory in selected tree");
+        DocumentFile photo=usb.createFile("image/jpeg","USB_"+UUID.randomUUID()+".jpg");
+        if(photo==null)throw new IOException("Cannot create JPEG document");
+        Uri uri=photo.getUri();
+        try{
+            try(OutputStream output=getContentResolver().openOutputStream(uri,"w")){
+                if(output==null)throw new IOException("Cannot open JPEG document");
+                writePhotoJpeg(bitmap,output);
+            }
+            return uri;
+        }catch(IOException|RuntimeException failure){
+            // The fresh, uniquely named destination is the only document eligible for cleanup.
+            try{photo.delete();}catch(RuntimeException cleanup){failure.addSuppressed(cleanup);}
+            throw failure;
+        }
+    }
+
+    private DocumentFile resolveIndexedSafRoot(DocumentFile root)throws IOException{
+        Uri parent=root.getUri();
+        Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(parent,DocumentsContract.getDocumentId(parent));
+        String nestedId=null;
+        try(android.database.Cursor cursor=getContentResolver().query(children,new String[]{
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE},null,null,null)){
+            Bundle extras=cursor==null?null:cursor.getExtras();
+            if(cursor==null||(extras!=null&&(extras.getBoolean(DocumentsContract.EXTRA_LOADING)
+                    ||extras.containsKey(DocumentsContract.EXTRA_ERROR)))){
+                throw new IOException("Selected photo tree is not fully listed");
+            }
+            while(cursor.moveToNext()){
+                if(Constants.RECORDING_DIRECTORY.equals(cursor.getString(1))
+                        &&DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(2))){
+                    if(nestedId!=null)throw new IOException("Ambiguous recording root");
+                    nestedId=cursor.getString(0);
+                    if(nestedId==null)throw new IOException("Recording folder identity unavailable");
+                }
+            }
+        }
+        if(nestedId==null)return root;
+        DocumentFile nested=RecordingStoragePaths.findOrCreateChildDirectory(root,Constants.RECORDING_DIRECTORY,false);
+        if(nested==null||!nestedId.equals(DocumentsContract.getDocumentId(nested.getUri())))
+            throw new IOException("Recording folder changed during photo save");
+        return nested;
+    }
+
+    private static void writePhotoJpeg(Bitmap bitmap,OutputStream output)throws IOException{
+        if(!bitmap.compress(Bitmap.CompressFormat.JPEG,95,output))throw new IOException("JPEG encoding failed");
+        output.flush();
     }
 
     private void completePhoto(boolean saved){

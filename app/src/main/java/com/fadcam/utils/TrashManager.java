@@ -147,7 +147,11 @@ public class TrashManager {
                 if (restore == null || restore.item == null || restore.destination == null) continue;
                 File original = new File(trashDir, restore.item.getTrashFileName());
                 // Keep the trash entry unless a completed destination can be identified.
-                if (!original.exists() && getUriSize(context, Uri.parse(restore.destination)) == restore.bytes) {
+                Uri destination = Uri.parse(restore.destination);
+                if (!original.exists() && (restore.digest != null
+                        ? CopyIntegrity.matches(context.getContentResolver().openInputStream(destination),
+                                restore.bytes, restore.digest)
+                        : getUriSize(context, destination) == restore.bytes)) {
                     items.remove(restore.item);
                     reconciled.add(record);
                 }
@@ -288,6 +292,8 @@ public class TrashManager {
         File original = isSafSource || videoUri.getPath() == null ? null : new File(videoUri.getPath());
         if (!isSafSource && (original == null || !original.isFile())) return false;
         long expected = original != null ? original.length() : getUriSize(context, videoUri);
+        // EOF alone does not establish that a provider supplied the entire original.
+        if (isSafSource && expected < 0) return false;
         List<TrashItem> items = loadTrashMetadata(context);
         File journalDir = new File(context.getFilesDir(), "trash-move-journal");
         if (!journalDir.isDirectory() && !journalDir.mkdirs()) return false;
@@ -309,12 +315,16 @@ public class TrashManager {
                 new AtomicFile(record).delete();
                 if (!targetTrashFile.createNewFile()) return false;
                 targetCreated = true;
+                java.security.MessageDigest digest = CopyIntegrity.sha256();
                 long copied = copyClosed(
-                        () -> original != null ? new FileInputStream(original)
-                                : context.getContentResolver().openInputStream(videoUri),
+                        () -> digesting(original != null ? new FileInputStream(original)
+                                : context.getContentResolver().openInputStream(videoUri), digest),
                         () -> new FileOutputStream(targetTrashFile), expected,
                         progressListener);
-                if (targetTrashFile.length() != copied) throw new IOException("휴지통 사본 크기 불일치");
+                if (targetTrashFile.length() != copied
+                        || !CopyIntegrity.matches(new FileInputStream(targetTrashFile), copied, digest.digest())) {
+                    throw new IOException("휴지통 사본을 검증하지 못했습니다.");
+                }
                 item.setSizeBytes(copied);
                 if (!writeAtomic(record, new Gson().toJson(item))) return false;
                 deletionAttempted = true;
@@ -347,6 +357,10 @@ public class TrashManager {
 
     interface StreamFactory<T> { T open() throws IOException; }
 
+    private static InputStream digesting(InputStream in, java.security.MessageDigest digest) {
+        return in == null ? null : new java.security.DigestInputStream(in, digest);
+    }
+
     private static boolean rollbackLocalMove(File trash, File original) {
         boolean created = false;
         boolean complete = false;
@@ -370,18 +384,24 @@ public class TrashManager {
         final TrashItem item;
         final String destination;
         final long bytes;
-        RestoreRecord(TrashItem item, Uri destination, long bytes) {
+        final byte[] digest;
+        RestoreRecord(TrashItem item, Uri destination, long bytes, byte[] digest) {
             this.item = item;
             this.destination = destination.toString();
             this.bytes = bytes;
+            this.digest = digest;
         }
     }
 
     private static File recordRestore(Context context, TrashItem item, Uri destination, long bytes) {
+        return recordRestore(context, item, destination, bytes, null);
+    }
+
+    private static File recordRestore(Context context, TrashItem item, Uri destination, long bytes, byte[] digest) {
         File folder = new File(context.getFilesDir(), "trash-restore-journal");
         if (!folder.isDirectory() && !folder.mkdirs()) return null;
         File journal = new File(folder, java.util.UUID.randomUUID() + ".json");
-        return writeAtomic(journal, new Gson().toJson(new RestoreRecord(item, destination, bytes))) ? journal : null;
+        return writeAtomic(journal, new Gson().toJson(new RestoreRecord(item, destination, bytes, digest))) ? journal : null;
     }
 
     static long copyClosed(StreamFactory<InputStream> input, StreamFactory<OutputStream> output,
@@ -816,36 +836,14 @@ public class TrashManager {
             String targetFileName = getUniqueSafFileName(safDir, item.getOriginalDisplayName());
             String mimeType = getMimeTypeForFile(targetFileName);
 
-            DocumentFile newDoc = null;
-            boolean complete = false;
             try {
-                newDoc = safDir.createFile(mimeType, targetFileName);
-                if (newDoc == null) {
-                    allSucceeded = false;
-                    continue;
-                }
-                Uri target = newDoc.getUri();
-                long copied = copyClosed(() -> new FileInputStream(fileInTrash),
-                        () -> context.getContentResolver().openOutputStream(target), fileInTrash.length(), null);
-                long stored = getUriSize(context, target);
-                if (stored >= 0 && stored != copied) throw new IOException("복원한 사본 크기 불일치");
-                File journal = recordRestore(context, item, target, copied);
-                if (journal == null) throw new IOException("복원 진행 기록을 저장하지 못했습니다.");
-                complete = true;
-                if (!fileInTrash.delete()) {
-                    new AtomicFile(journal).delete();
-                    allSucceeded = false;
-                    continue;
-                }
-                updatedMetadata.remove(item);
+                DocumentFile newDoc = safDir.createFile(mimeType, targetFileName);
+                if (newDoc != null && restoreToSafDocument(context, fileInTrash, item, newDoc)) {
+                    updatedMetadata.remove(item);
+                } else allSucceeded = false;
             } catch (IOException | RuntimeException e) {
                 FLog.e(TAG, "휴지통 파일을 저장 위치에 복원하지 못했습니다.", e);
                 allSucceeded = false;
-            } finally {
-                if (newDoc != null && !complete) {
-                    try { newDoc.delete(); }
-                    catch (RuntimeException e) { FLog.w(TAG, "불완전한 복원 사본을 정리하지 못했습니다.", e); }
-                }
             }
         }
 
@@ -855,6 +853,37 @@ public class TrashManager {
         }
 
         return allSucceeded;
+    }
+
+    static boolean restoreToSafDocument(Context context, File source, TrashItem item, DocumentFile newDoc)
+            throws IOException {
+        boolean complete = false;
+        try {
+            Uri target = newDoc.getUri();
+            java.security.MessageDigest digest = CopyIntegrity.sha256();
+            long copied = copyClosed(() -> digesting(new FileInputStream(source), digest),
+                    () -> context.getContentResolver().openOutputStream(target), source.length(), null);
+            long stored = getUriSize(context, target);
+            byte[] expectedDigest = digest.digest();
+            if ((stored >= 0 && stored != copied) || !CopyIntegrity.matches(
+                    context.getContentResolver().openInputStream(target), copied, expectedDigest)) {
+                throw new IOException("복원한 사본을 검증하지 못했습니다.");
+            }
+            File journal = recordRestore(context, item, target, copied, expectedDigest);
+            if (journal == null) throw new IOException("복원 진행 기록을 저장하지 못했습니다.");
+            complete = true;
+            if (source.delete()) return true;
+            new AtomicFile(journal).delete();
+            return false;
+        } finally {
+            if (!complete) {
+                try {
+                    if (!newDoc.delete()) FLog.w(TAG, "불완전한 복원 사본이 저장 위치에 남았습니다.");
+                } catch (RuntimeException e) {
+                    FLog.w(TAG, "불완전한 복원 사본을 정리하지 못했습니다.", e);
+                }
+            }
+        }
     }
 
     /**

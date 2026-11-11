@@ -46,6 +46,84 @@ import static org.robolectric.Shadows.shadowOf;
 public class GallerySourcePreparationTest {
     @Rule public final TemporaryFolder temp = new TemporaryFolder();
 
+    @Test public void unindexedFragmentedMp4DoesNotClipFramesToShortMetadata() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        Uri uri = Uri.parse("content://gallery.fixture.provider/short-mvhd-fragmented.mp4");
+        byte[] fixture;
+        try (java.io.InputStream input = getClass().getResourceAsStream("/playback/short-mvhd-fragmented.mp4")) {
+            assertNotNull(input);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[512];
+            for (int n; (n = input.read(buffer)) >= 0;) bytes.write(buffer, 0, n);
+            fixture = bytes.toByteArray();
+        }
+        shadowOf(context.getContentResolver()).registerInputStreamSupplier(uri,
+                () -> new java.io.ByteArrayInputStream(fixture));
+        org.robolectric.shadows.ShadowMediaMetadataRetriever.addMetadata(
+                org.robolectric.shadows.util.DataSource.toDataSource(context, uri),
+                android.media.MediaMetadataRetriever.METADATA_KEY_DURATION, "100");
+        try (android.media.MediaMetadataRetriever metadata = new android.media.MediaMetadataRetriever()) {
+            metadata.setDataSource(context, uri);
+            assertEquals("100", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION));
+        }
+        SeekableFragmentedMp4MediaSourceFactory factory = new SeekableFragmentedMp4MediaSourceFactory(context) {
+            @Override ParcelFileDescriptor openScanDescriptor(Uri ignored) { return null; }
+        };
+        assertTrue(factory.isFragmentedMp4(uri));
+        MediaSource source = factory.createMediaSource(MediaItem.fromUri(uri));
+        assertEquals(uri, source.getMediaItem().localConfiguration.uri);
+        assertTrue("100 ms of metadata cannot truncate valid fragment data",
+                source instanceof androidx.media3.exoplayer.source.ProgressiveMediaSource);
+    }
+
+    @Test public void newestRequestPreparesAtDeadlineEvenWhenTwoProvidersIgnoreCancellation() throws Exception {
+        PlayerHolder holder = ReflectionHelpers.callConstructor(PlayerHolder.class);
+        ExoPlayer owner = mock(ExoPlayer.class);
+        when(owner.getApplicationLooper()).thenReturn(Looper.getMainLooper());
+        when(owner.getPlayWhenReady()).thenReturn(true);
+        SeekableFragmentedMp4MediaSourceFactory factory = mock(SeekableFragmentedMp4MediaSourceFactory.class);
+        ReflectionHelpers.setField(holder, "player", owner);
+        ReflectionHelpers.setField(holder, "fmp4SourceFactory", factory);
+        ThreadPoolExecutor worker = ReflectionHelpers.getField(holder, "preparationExecutor");
+        CountDownLatch enteredA = new CountDownLatch(1);
+        CountDownLatch enteredB = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MediaSource staleSource = mock(MediaSource.class);
+        Uri latest = Uri.parse("content://provider/latest");
+        when(factory.createMediaSource(any())).thenAnswer(invocation -> {
+            MediaItem item = invocation.getArgument(0);
+            if (!latest.equals(item.localConfiguration.uri)) {
+                ("blocked-a".equals(item.localConfiguration.uri.getLastPathSegment())
+                        ? enteredA : enteredB).countDown();
+                while (true) {
+                    try { release.await(); break; }
+                    catch (InterruptedException ignored) { /* Broken providers can ignore cancellation. */ }
+                }
+            }
+            return staleSource;
+        });
+        try {
+            holder.setMediaIfNeeded(Uri.parse("content://provider/blocked-a"));
+            assertTrue("A must start before it is superseded", enteredA.await(5, TimeUnit.SECONDS));
+            holder.setMediaIfNeeded(Uri.parse("content://provider/blocked-b"));
+            assertTrue("B must start before the last selection", enteredB.await(5, TimeUnit.SECONDS));
+            holder.setMediaIfNeeded(latest);
+            shadowOf(Looper.getMainLooper()).idleFor(3, TimeUnit.SECONDS);
+            assertEquals(latest, holder.getCurrentUri());
+            verify(owner, times(1)).prepare();
+            release.countDown();
+            worker.shutdown();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+            shadowOf(Looper.getMainLooper()).idle();
+            verify(owner, never()).setMediaSource(same(staleSource), anyLong());
+            verify(owner, times(1)).prepare();
+            verify(factory, times(2)).createMediaSource(any());
+        } finally {
+            release.countDown();
+            worker.shutdownNow();
+        }
+    }
+
     @Test public void sameNameAcrossVolumesStillReadsSelectedProviderThroughSeparatePlaybackDescriptor() throws Exception {
         Context app = RuntimeEnvironment.getApplication();
         String authority = "gallery.fixture.provider";
@@ -204,7 +282,13 @@ public class GallerySourcePreparationTest {
             MediaItem item = invocation.getArgument(0);
             if (a.equals(item.localConfiguration.uri)) {
                 enteredA.countDown();
-                assertTrue(releaseA.await(5, TimeUnit.SECONDS));
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+                boolean released = false;
+                while (!released && System.nanoTime() < deadline) {
+                    try { released = releaseA.await(deadline - System.nanoTime(), TimeUnit.NANOSECONDS); }
+                    catch (InterruptedException ignored) { /* Simulate a provider that ignores cancellation. */ }
+                }
+                assertTrue(released);
                 return obsolete;
             }
             enteredB.countDown();

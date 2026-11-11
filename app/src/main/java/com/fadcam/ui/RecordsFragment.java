@@ -4591,15 +4591,24 @@ public class RecordsFragment extends BaseFragment implements
         }
 
         // Use RecordsDeletionService for consistent dock UI and progress tracking
-        if (!RecordsDeletionService.startExportSession(requireContext(), requestItems, treeUri)) {
+        List<Uri> submittedSelection = pendingCustomExportUris;
+        android.os.ResultReceiver reply = new android.os.ResultReceiver(new android.os.Handler(android.os.Looper.getMainLooper())) {
+            @Override protected void onReceiveResult(int resultCode, android.os.Bundle resultData) {
+                if (!isAdded()) return;
+                if (resultCode == android.app.Activity.RESULT_OK) {
+                    if (pendingCustomExportUris == submittedSelection) pendingCustomExportUris.clear();
+                    syncDeletionUiFromStore(false);
+                    Toast.makeText(requireContext(), getString(R.string.records_batch_save_queued, requestItems.size()),
+                            Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(requireContext(), R.string.records_operation_busy, Toast.LENGTH_SHORT).show();
+                }
+            }
+        };
+        if (!RecordsDeletionService.startExportSession(requireContext(), requestItems, treeUri, reply)) {
             Toast.makeText(requireContext(), R.string.records_operation_busy, Toast.LENGTH_SHORT).show();
             return;
         }
-        pendingCustomExportUris.clear();
-        syncDeletionUiFromStore(false);
-        Toast.makeText(requireContext(),
-                getString(R.string.records_batch_save_queued, requestItems.size()),
-                Toast.LENGTH_SHORT).show();
     }
 
     // --- Deletion Logic ---

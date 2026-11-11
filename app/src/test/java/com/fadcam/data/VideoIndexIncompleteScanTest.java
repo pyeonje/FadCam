@@ -54,10 +54,10 @@ public class VideoIndexIncompleteScanTest {
         assertTrue(complete.coversMissing(expected));
     }
     @Test public void incompleteScanRetainsMissingRowsThenCompleteScanRemovesOnlyItsOwnMissingRow() {
-        Uri tree = Uri.parse("content://provider/tree/SD%3AMedia");
+        Uri tree = Uri.parse("content://com.android.externalstorage.documents/tree/SD%3AMedia");
         String a = tree + "/document/SD%3AMedia%2Fa.mp4";
         String b = tree + "/document/SD%3AMedia%2Fb.mp4";
-        String unrelated = "content://provider/tree/SD%3AOther/document/SD%3AOther%2Fb.mp4";
+        String unrelated = "content://com.android.externalstorage.documents/tree/SD%3AOther/document/SD%3AOther%2Fb.mp4";
         VideoIndexDao dao = mock(VideoIndexDao.class);
         when(dao.getDeltaCheckRows()).thenReturn(Arrays.asList(row(a), row(b), row(unrelated)));
         when(dao.getAllNewestFirst()).thenReturn(Collections.emptyList());
@@ -65,21 +65,22 @@ public class VideoIndexIncompleteScanTest {
         VideoIndexEntity found = new VideoIndexEntity();
         found.uriString = a;
         repo.reconcile(new FastFileScanner.ScanResult(Collections.singletonList(found),
-                Collections.singletonList("provider returned null cursor"), tree, null));
+                Collections.singletonList("provider returned null cursor"), tree, Collections.emptySet()));
         verify(dao, never()).deleteByUris(anyList());
         repo.reconcile(new FastFileScanner.ScanResult(Collections.singletonList(found),
-                Collections.emptyList(), tree, null));
+                Collections.emptyList(), tree, Collections.singleton("SD:Media")));
         verify(dao).deleteByUris(Collections.singletonList(b));
         verify(dao, never()).deleteAll();
     }
 
     @Test public void safProviderPartialAndCompleteQueriesReconcileWithoutLosingUnconfirmedRows() {
-        Uri tree = Uri.parse("content://scan.fixture/tree/SD%3AMedia");
+        Uri tree = Uri.parse("content://com.android.externalstorage.documents/tree/SD%3AMedia");
         Uri camera = DocumentsContract.buildDocumentUriUsingTree(tree, "SD:Media/Camera");
         Uri rootChildren = DocumentsContract.buildChildDocumentsUriUsingTree(tree, "SD:Media");
         Uri cameraChildren = DocumentsContract.buildChildDocumentsUriUsingTree(tree, "SD:Media/Camera");
         Uri a = DocumentsContract.buildDocumentUriUsingTree(tree, "SD:Media/Camera/a.mp4");
         Uri b = DocumentsContract.buildDocumentUriUsingTree(tree, "SD:Media/Camera/b.mp4");
+        Uri other = DocumentsContract.buildDocumentUriUsingTree(tree, "SD:Media/Other/keep.mp4");
         ContentResolver resolver = mock(ContentResolver.class);
         Context context = new ContextWrapper(RuntimeEnvironment.getApplication()) {
             @Override public Context getApplicationContext() { return this; }
@@ -100,6 +101,11 @@ public class VideoIndexIncompleteScanTest {
                     row[1] = Constants.RECORDING_SUBDIR_CAMERA;
                     row[2] = DocumentsContract.Document.MIME_TYPE_DIR;
                     cursor.addRow(row);
+                    Object[] untouchedFolder = new Object[columns.length];
+                    untouchedFolder[0] = "SD:Media/Other";
+                    untouchedFolder[1] = "Other";
+                    untouchedFolder[2] = DocumentsContract.Document.MIME_TYPE_DIR;
+                    cursor.addRow(untouchedFolder);
                     return cursor;
                 });
         java.util.concurrent.atomic.AtomicInteger stage = new java.util.concurrent.atomic.AtomicInteger();
@@ -118,7 +124,7 @@ public class VideoIndexIncompleteScanTest {
 
         FastFileScanner scanner = new FastFileScanner(context);
         VideoIndexDao dao = mock(VideoIndexDao.class);
-        when(dao.getDeltaCheckRows()).thenReturn(Arrays.asList(row(a.toString()), row(b.toString())));
+        when(dao.getDeltaCheckRows()).thenReturn(Arrays.asList(row(a.toString()), row(b.toString()), row(other.toString())));
         when(dao.getAllNewestFirst()).thenReturn(Collections.emptyList());
         VideoIndexRepository repo = new VideoIndexRepository(context, dao);
         for (int partialStage = 0; partialStage < 2; partialStage++) {
@@ -145,6 +151,7 @@ public class VideoIndexIncompleteScanTest {
         Uri inside = DocumentsContract.buildDocumentUriUsingTree(tree, nestedId + "/Camera/old.mp4");
         Uri rootChildren = DocumentsContract.buildChildDocumentsUriUsingTree(tree, "SD:Media");
         Uri nestedChildren = DocumentsContract.buildChildDocumentsUriUsingTree(tree, nestedId);
+        Uri cameraChildren = DocumentsContract.buildChildDocumentsUriUsingTree(tree, nestedId + "/Camera");
 
         ContentResolver resolver = mock(ContentResolver.class);
         Context context = new ContextWrapper(RuntimeEnvironment.getApplication()) {
@@ -165,6 +172,17 @@ public class VideoIndexIncompleteScanTest {
                     return cursor;
                 });
         when(resolver.query(eq(nestedChildren), any(String[].class), isNull(), isNull(), isNull()))
+                .thenAnswer(call -> {
+                    String[] columns = call.getArgument(1);
+                    MatrixCursor cursor = new MatrixCursor(columns);
+                    Object[] row = new Object[columns.length];
+                    row[0] = nestedId + "/Camera";
+                    row[1] = Constants.RECORDING_SUBDIR_CAMERA;
+                    row[2] = DocumentsContract.Document.MIME_TYPE_DIR;
+                    cursor.addRow(row);
+                    return cursor;
+                });
+        when(resolver.query(eq(cameraChildren), any(String[].class), isNull(), isNull(), isNull()))
                 .thenAnswer(call -> new MatrixCursor(call.getArgument(1)));
 
         FastFileScanner.ScanResult complete = new FastFileScanner(context).scanWithStatus(preferences);
