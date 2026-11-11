@@ -1,0 +1,4 @@
+PersonalWhiteBalance.java adapts convertTemperatureToRggb and RGBtoGain from Open Camera / OW Camera contributors, distributed under GPL version 3 or later.
+Source reviewed: https://github.com/jamsinclair/ow-camera-android/blob/development/app/src/main/java/net/sourceforge/opencamera/cameracontroller/CameraController2.java
+Upstream Open Camera: https://opencamera.org.uk/ ; https://sourceforge.net/p/opencamera/code/
+The application is distributed under GNU GPL version 3. This generic Kelvin conversion does not reproduce Samsung proprietary ISP calibration or Samsung Log.

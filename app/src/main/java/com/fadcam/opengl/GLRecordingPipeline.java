@@ -183,10 +183,6 @@ public class GLRecordingPipeline {
      *  stays continuous (no desync) but silent. Toggled live from the home UI. */
     private volatile boolean audioMuted = false;
     private final Object audioLock = new Object();
-    private android.media.AudioManager audioManager;
-    private android.media.AudioManager.OnAudioFocusChangeListener audioFocusListener;
-    private int originalAudioMode = -1; // Store original mode to restore on stop
-    private boolean originalSpeakerphoneOn = false; // Store original speakerphone state to restore on stop
     private int consecutive512Count = 0; // Track consecutive 512-byte AAC frames (silence detection)
     
     // Debug counters for tracking sample writing
@@ -208,8 +204,6 @@ public class GLRecordingPipeline {
     // Audio settings (always set from preferences or app defaults)
     private int audioSource;
     private android.media.AudioDeviceInfo preferredAudioDevice;
-    private boolean isBtSco;
-    private android.media.AudioManager savedAudioManager;
     private int audioSampleRate;
     private int audioBitrate;
     private int audioChannelCount;
@@ -421,6 +415,7 @@ public class GLRecordingPipeline {
         this.currentOutputFilePath = outputFilePath;
         this.currentOutputFd = null;
         this.orientation = orientation;
+        this.deviceOrientation = com.fadcam.utils.CameraDisplayOrientation.resolve(context, orientation);
         this.sensorOrientation = sensorOrientation;
         this.videoCodec = videoCodec;
         this.locationLatitude = latitude;
@@ -455,6 +450,7 @@ public class GLRecordingPipeline {
         this.currentOutputFilePath = null;
         this.currentOutputFd = outputFd;
         this.orientation = orientation;
+        this.deviceOrientation = com.fadcam.utils.CameraDisplayOrientation.resolve(context, orientation);
         this.sensorOrientation = sensorOrientation;
         this.videoCodec = videoCodec;
         this.locationLatitude = latitude;
@@ -615,6 +611,7 @@ public class GLRecordingPipeline {
                 glRenderer = new GLWatermarkRenderer(context, encoderInputSurface, orientation, sensorOrientation,
                         videoWidth, videoHeight, false);
                 glRenderer.setUserOrientationSetting(orientation);
+                glRenderer.setDeviceOrientation(deviceOrientation);
                 glRenderer.setRecordingPipeline(this); // Set reference for timestamp synchronization
                 glRenderer.setFrontVideoMirrorEnabled(frontVideoMirrorEnabled);
                 // Propagate encoder dimensions that were computed during initializeEncoder().
@@ -1299,6 +1296,24 @@ public class GLRecordingPipeline {
      * Initializes the encoder and input surface once at the beginning.
      * This should be called only once during the recording session.
      */
+    /** Prepending headers is optional; some conforming encoders reject enabling it. */
+    static void configureVideoEncoder(MediaCodec encoder, MediaFormat format) {
+        try {
+            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        } catch (IllegalArgumentException rejected) {
+            if (!format.containsKey(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES)
+                    || format.getInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES) != 1) {
+                throw rejected;
+            }
+            // One bounded retry on the same codec, retaining dimensions, bitrate,
+            // frame rate and the existing output-format CSD/muxer handling.
+            FLog.w(TAG, "[ENCODER] Configuration rejected; retrying once with optional header prepend disabled");
+            encoder.reset();
+            format.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 0);
+            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        }
+    }
+
     private void initializeEncoder() throws IOException {
         // Use app's orientation setting, not device rotation
         boolean appWantsPortrait = "portrait".equalsIgnoreCase(orientation);
@@ -1341,7 +1356,7 @@ public class GLRecordingPipeline {
                     }
                 } catch (Exception ignored) {}
             }
-            videoEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            configureVideoEncoder(videoEncoder, format);
             // Encoder identity — critical for OEM-specific CSD bugs (Samsung C2 vs Google C2 etc.)
             try {
                 FLog.i(TAG, "[ENCODER] Video encoder: " + videoEncoder.getCanonicalName() + " | MIME=" + currentMimeType
@@ -1380,7 +1395,7 @@ public class GLRecordingPipeline {
                         }
                     } catch (Exception ignored) {}
                 }
-                videoEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                configureVideoEncoder(videoEncoder, format);
                 try {
                     FLog.i(TAG, "[ENCODER] Video encoder (H.264 fallback): " + videoEncoder.getCanonicalName()
                             + " | MIME=" + currentMimeType + " | " + encoderWidth + "x" + encoderHeight);
@@ -2548,7 +2563,6 @@ public class GLRecordingPipeline {
      * 3. THEN finalize muxer
      * 4. THEN release all resources
      */
-    @SuppressWarnings("deprecation") // legacy BT SCO / speakerphone APIs for older devices
     public void stopRecording() {
         // stop log removed
         try {
@@ -2755,64 +2769,8 @@ public class GLRecordingPipeline {
             audioRecord = null;
         }
 
-        // Release audio focus to allow other apps to use audio
-        if (audioManager != null) {
-            try {
-                // Restore original audio mode and speakerphone state
-                if (originalAudioMode != -1) {
-                    audioManager.setMode(originalAudioMode);
-                    FLog.i(TAG, "AudioManager mode restored to: " + originalAudioMode);
-                }
-                setSpeakerphoneOnCompat(audioManager, originalSpeakerphoneOn);
-                // Stop BT SCO if it was started
-                if (isBtSco) {
-                    try {
-                        audioManager.stopBluetoothSco();
-                        audioManager.setBluetoothScoOn(false);
-                        FLog.i(TAG, "BT SCO stopped and released");
-                    } catch (Exception e) {
-                        FLog.w(TAG, "Error stopping BT SCO", e);
-                    }
-                }
-                FLog.i(TAG, "Speakerphone restored to: " + originalSpeakerphoneOn);
-                
-                // Release audio focus
-                if (audioFocusListener != null) {
-                    audioManager.abandonAudioFocus(audioFocusListener);
-                }
-            } catch (Exception e) {
-                FLog.e(TAG, "Error releasing audio resources", e);
-            }
-            audioManager = null;
-            audioFocusListener = null;
-            originalAudioMode = -1;
-            originalSpeakerphoneOn = false;
-        }
-        
-        // Join audio thread if still running (should have exited after EOS)
-        if (audioThread != null) {
-            try {
-                audioThread.join(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            audioThread = null;
-        }
-        
-        audioTrackIndex = -1;
-        audioEncoderStarted = false;
-        // Reset EOS tracking flags for next recording
-        videoEosReceived = false;
-        audioEosReceived = false;
+        // Input capture never owns playback focus or global output/call routing.
 
-        // stop log removed
-        // Reset flags so a new recording can be started cleanly
-        isStopped = false;
-        released = false;
-        isRecording = false;
-        // Clear retry/time bases
-        recordingStartTimeNanos = -1;
-        recordingStartSystemTimeNanos = -1;
     }
 
     private void quickReleaseForPreviewOnly() {
@@ -3097,6 +3055,21 @@ public class GLRecordingPipeline {
         }
     }
 
+    /** Resize/rotate only an idle preview on its existing GL thread and surfaces. */
+    public void updatePreviewOnlyDisplay(int rotation, int width, int height) {
+        if (rotation < Surface.ROTATION_0 || rotation > Surface.ROTATION_270 || width <= 0 || height <= 0) return;
+        Handler renderHandler = handler;
+        if (!previewOnlyRendering || isRecording || released || isStopped || renderHandler == null) return;
+        renderHandler.post(() -> {
+            // A recording handoff or teardown can overtake a queued UI resize.
+            if (!previewOnlyRendering || isRecording || released || isStopped || glRenderer == null) return;
+            deviceOrientation = rotation;
+            mSurfaceWidth = width;
+            mSurfaceHeight = height;
+            glRenderer.setPreviewOnlyDisplay(rotation, width, height);
+        });
+    }
+
     /**
      * Sets the exposure compensation for the GL shader.
      * This applies exposure changes in the OpenGL pipeline, affecting both preview
@@ -3310,43 +3283,6 @@ public class GLRecordingPipeline {
     }
 
     /**
-     * setSpeakerphoneOn is deprecated in API 31 in favor of setCommunicationDevice.
-     * This keeps the legacy behavior with a modern path where available.
-     */
-    @SuppressWarnings("deprecation")
-    private void setSpeakerphoneOnCompat(android.media.AudioManager am, boolean on) {
-        if (am == null) return;
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            try {
-                java.util.List<android.media.AudioDeviceInfo> devices = am.getAvailableCommunicationDevices();
-                android.media.AudioDeviceInfo speaker = null;
-                for (android.media.AudioDeviceInfo d : devices) {
-                    if (d.getType() == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
-                        speaker = d;
-                        break;
-                    }
-                }
-                if (speaker != null) {
-                    if (on) {
-                        am.setCommunicationDevice(speaker);
-                    } else {
-                        android.media.AudioDeviceInfo earpiece = null;
-                        for (android.media.AudioDeviceInfo d : devices) {
-                            if (d.getType() == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) {
-                                earpiece = d;
-                                break;
-                            }
-                        }
-                        am.setCommunicationDevice(earpiece);
-                    }
-                    return;
-                }
-            } catch (Exception ignored) {}
-        }
-        am.setSpeakerphoneOn(on);
-    }
-
-    /**
      * Initializes audio settings from SharedPreferencesManager.
      * This should be called before starting audio recording/encoding.
      */
@@ -3358,51 +3294,10 @@ public class GLRecordingPipeline {
         this.audioChannelCount = 2;
 
         String audioInputSource = prefs.getAudioInputSource();
-        this.preferredAudioDevice = null;
-        this.isBtSco = false;
-        this.savedAudioManager = null;
+        this.preferredAudioDevice = com.fadcam.utils.RecordingAudioRouting.resolveInput(context, prefs);
 
-        if (com.fadcam.SharedPreferencesManager.AUDIO_INPUT_SOURCE_WIRED.equals(audioInputSource)) {
-            int savedDeviceType = prefs.getAudioInputDeviceType();
-            android.media.AudioManager am = (android.media.AudioManager)
-                    context.getSystemService(Context.AUDIO_SERVICE);
-            if (am != null) {
-                android.media.AudioDeviceInfo[] devices = am.getDevices(android.media.AudioManager.GET_DEVICES_INPUTS);
-                if (devices != null) {
-                    for (android.media.AudioDeviceInfo device : devices) {
-                        if (device == null) continue;
-                        int type = device.getType();
-                        if (isExternalInputDevice(type)) {
-                            if (savedDeviceType == -1 || type == savedDeviceType) {
-                                this.preferredAudioDevice = device;
-                                this.isBtSco = (type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-                                        || type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
-                                        || type == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET);
-                                FLog.i(TAG, "External audio device matched: " + device.getProductName()
-                                        + " (type=" + type + ", btSco=" + this.isBtSco + ")");
-                                break;
-                            }
-                        }
-                    }
-                }
-                // Fallback: if saved type not found, pick first available external device
-                if (this.preferredAudioDevice == null && devices != null) {
-                    for (android.media.AudioDeviceInfo device : devices) {
-                        if (device != null && isExternalInputDevice(device.getType())) {
-                            this.preferredAudioDevice = device;
-                            this.isBtSco = (device.getType() == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-                                    || device.getType() == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
-                                    || device.getType() == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET);
-                            FLog.i(TAG, "External audio device (fallback): " + device.getProductName()
-                                    + " (type=" + device.getType() + ")");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (this.preferredAudioDevice != null) {
+        if (com.fadcam.SharedPreferencesManager.AUDIO_INPUT_SOURCE_WIRED.equals(audioInputSource)
+                && this.preferredAudioDevice != null) {
             this.audioSource = android.media.MediaRecorder.AudioSource.MIC;
             FLog.i(TAG, "Audio source: MIC (external device route)");
         } else if (com.fadcam.SharedPreferencesManager.getInstance(context).isRawAudioEnabled()) {
@@ -3438,20 +3333,11 @@ public class GLRecordingPipeline {
         }
     }
 
-    private boolean isExternalInputDevice(int type) {
-        return type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET
-                || type == android.media.AudioDeviceInfo.TYPE_USB_DEVICE
-                || type == android.media.AudioDeviceInfo.TYPE_USB_HEADSET
-                || type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-                || type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
-                || type == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET;
-    }
 
     /**
      * Sets up the audio encoder and AudioRecord for AAC audio capture.
      * Call before starting audio thread.
      */
-    @SuppressWarnings("deprecation") // legacy BT SCO / speakerphone APIs for older devices
     private void setupAudio() {
         if (!audioRecordingEnabled) {
             return;
@@ -3526,68 +3412,13 @@ public class GLRecordingPipeline {
                     .setBufferSizeInBytes(bufferSize)
                     .build();
 
-            if (preferredAudioDevice != null) {
-                boolean routed = audioRecord.setPreferredDevice(preferredAudioDevice);
-                FLog.i(TAG, "setPreferredDevice -> " + preferredAudioDevice.getProductName() + ": " + (routed ? "SUCCESS" : "FAILED"));
-            }
+            com.fadcam.utils.RecordingAudioRouting.configureInput(audioRecord, preferredAudioDevice);
 
             if (audioRecord.getState() != android.media.AudioRecord.STATE_INITIALIZED) {
                 throw new RuntimeException("AudioRecord initialization failed");
             }
 
-            // CRITICAL: Set AudioManager mode for recording
-            audioManager = (android.media.AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-            savedAudioManager = audioManager;
-            if (audioManager != null) {
-                originalAudioMode = audioManager.getMode();
-                originalSpeakerphoneOn = audioManager.isSpeakerphoneOn();
-
-                if (isBtSco) {
-                    // BT SCO requires special setup: start SCO connection and set mode
-                    audioManager.startBluetoothSco();
-                    audioManager.setBluetoothScoOn(true);
-                    audioManager.setMode(android.media.AudioManager.MODE_IN_COMMUNICATION);
-                    setSpeakerphoneOnCompat(audioManager, false);
-                    FLog.i(TAG, "AudioManager: BT SCO started, mode=MODE_IN_COMMUNICATION");
-                } else {
-                    audioManager.setMode(android.media.AudioManager.MODE_NORMAL);
-                    setSpeakerphoneOnCompat(audioManager, true);
-                    FLog.i(TAG, "AudioManager mode set to MODE_NORMAL for camcorder recording (was: " + originalAudioMode + "), speakerphone enabled");
-                }
-                
-                // Request audio focus with USAGE_MEDIA for camcorder recording
-                audioFocusListener = focusChange -> {
-                    if (focusChange == android.media.AudioManager.AUDIOFOCUS_LOSS || focusChange == android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-                        FLog.w(TAG, "⚠️ AUDIO FOCUS LOST: " + focusChange);
-                    } else if (focusChange == android.media.AudioManager.AUDIOFOCUS_GAIN) {
-                        FLog.i(TAG, "Audio focus regained");
-                    }
-                };
-
-                // Use modern AudioFocusRequest for Android O+ with MEDIA usage for camcorder
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    android.media.AudioAttributes audioAttrs = new android.media.AudioAttributes.Builder()
-                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
-                            .build();
-
-                    android.media.AudioFocusRequest focusRequest = new android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
-                            .setAudioAttributes(audioAttrs)
-                            .setAcceptsDelayedFocusGain(false)
-                            .setWillPauseWhenDucked(false)
-                            .setOnAudioFocusChangeListener(audioFocusListener)
-                            .build();
-
-                    int result = audioManager.requestAudioFocus(focusRequest);
-                    FLog.w(TAG, "🎤 AudioFocusRequest result: " + (result == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED ? "GRANTED" : "DENIED"));
-                } else {
-                    int result = audioManager.requestAudioFocus(
-                            audioFocusListener,
-                            android.media.AudioManager.STREAM_MUSIC,
-                            android.media.AudioManager.AUDIOFOCUS_GAIN);
-                    FLog.w(TAG, "🎤 AudioFocus (legacy) result: " + (result == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED ? "GRANTED" : "DENIED"));
-                }
-            }
+            // Recording is an input operation: leave music, Buds output and call routing alone.
         } catch (Exception e) {
             FLog.e(TAG, "Audio setup failed", e);
             audioRecordingEnabled = false;
@@ -3605,12 +3436,14 @@ public class GLRecordingPipeline {
         audioThread = new Thread(() -> {
             try {
                 audioRecord.startRecording();
+                com.fadcam.utils.RecordingAudioRouting.logActualInput(audioRecord, preferredAudioDevice);
                 // Use a large byte[] buffer and feed encoder in sane chunks aligned to frames
                 final int bytesPerFrame = audioChannelCount * 2; // 16-bit PCM
                 final int aacFrameSize = 1024 * bytesPerFrame; // 1024 PCM frames per AAC frame
                 final int readBufferSize = Math.max(aacFrameSize * 4, 131072); // >= 128 KiB
                 byte[] readBuffer = new byte[readBufferSize];
                 long lastPtsUs = 0L;
+                long lastInputEndPtsUs = 0L;
                 
                 while (audioThreadRunning) {
                     // Check if we're paused - wait for resume
@@ -3670,6 +3503,7 @@ public class GLRecordingPipeline {
                                 
                                 audioEncoder.queueInputBuffer(inputBufferIndex, 0, toCopy, ptsUs, 0);
                                 lastPtsUs = ptsUs;
+                                lastInputEndPtsUs = ptsUs + (toCopy / bytesPerFrame) * 1_000_000L / audioSampleRate;
                             }
                             
                             // Advance counters
@@ -3693,9 +3527,9 @@ public class GLRecordingPipeline {
                 while (eosRetries > 0 && !eosQueued) {
                     int inputBufferIndex = audioEncoder.dequeueInputBuffer(50000); // 50ms timeout per retry
                     if (inputBufferIndex >= 0) {
-                        // Use system time for EOS PTS too, to match monotonic timeline
+                        // EOS ends captured PCM; paused time and codec drain are not audio.
                         synchronized (timestampLock) {
-                            long eosPtsUs = Math.max(0, (System.nanoTime() - recordingStartSystemTimeNanos - totalPauseDurationNanos) / 1000L);
+                            long eosPtsUs = lastInputEndPtsUs;
                             if (eosPtsUs < lastPtsUs)
                                 eosPtsUs = lastPtsUs; // monotonic safeguard
                             audioEncoder.queueInputBuffer(inputBufferIndex, 0, 0, eosPtsUs,

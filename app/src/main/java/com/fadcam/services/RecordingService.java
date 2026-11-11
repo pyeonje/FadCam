@@ -153,6 +153,10 @@ public class RecordingService extends Service {
     private static final long GPS_PROVIDER_CHECK_INTERVAL_MS = 5000;
 
     private volatile RecordingState recordingState = RecordingState.NONE;
+    public static final String EXTRA_SESSION_DISPLAY_ORIENTATION = "com.fadcam.extra.SESSION_DISPLAY_ORIENTATION";
+    public static final String EXTRA_PREVIEW_DISPLAY_ROTATION = "com.fadcam.extra.PREVIEW_DISPLAY_ROTATION";
+    private volatile int sessionDisplayOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+    private volatile long finalizingTimelineMs;
     private static volatile RecordingService liveInstance;
     private final RecordingHaptics recordingHaptics = new RecordingHaptics();
 
@@ -165,7 +169,95 @@ public class RecordingService extends Service {
         RecordingService service = liveInstance;
         return service != null && !service.isStopping ? service.recordingState : RecordingState.NONE;
     }
-    private boolean previewOnlyActive = false;
+
+    /** The accepted session's direction survives Fragment/Activity background and re-creation. */
+    public static int getSessionDisplayOrientation() {
+        RecordingService service=liveInstance;
+        return service!=null && !service.isStopping && service.recordingState!=RecordingState.NONE
+                ?service.sessionDisplayOrientation:android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+    }
+
+    private static boolean absoluteDisplayOrientation(int value) {
+        return value==android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                || value==android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                || value==android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+                || value==android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE;
+    }
+
+    /** Display rotation is relative to the device's natural orientation, not always portrait. */
+    public static int snapshotDisplayOrientation(Context context) {
+        int rotation=com.fadcam.utils.CameraDisplayOrientation.currentRotation(context);
+        int configuration=context.getResources().getConfiguration().orientation;
+        int reverseId=context.getResources().getIdentifier("config_reverseDefaultRotation","bool","android");
+        boolean reverse=reverseId!=0 && context.getResources().getBoolean(reverseId);
+        return displayOrientation(rotation,configuration,reverse);
+    }
+
+    private static int displayOrientation(int rotation,int configuration,boolean reverseDefault) {
+        if(rotation<Surface.ROTATION_0 || rotation>Surface.ROTATION_270
+                || (configuration!=android.content.res.Configuration.ORIENTATION_PORTRAIT
+                && configuration!=android.content.res.Configuration.ORIENTATION_LANDSCAPE))
+            return android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        boolean sideways=rotation==Surface.ROTATION_90 || rotation==Surface.ROTATION_270;
+        boolean naturalLandscape=sideways
+                ?configuration==android.content.res.Configuration.ORIENTATION_PORTRAIT
+                :configuration==android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        if(naturalLandscape) {
+            if(rotation==Surface.ROTATION_0)return android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
+            if(rotation==Surface.ROTATION_180)return android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE;
+            boolean normalPortrait=rotation==(reverseDefault?Surface.ROTATION_90:Surface.ROTATION_270);
+            return normalPortrait?android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT:android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT;
+        }
+        if(rotation==Surface.ROTATION_0)return android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+        if(rotation==Surface.ROTATION_180)return android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT;
+        boolean normalLandscape=rotation==(reverseDefault?Surface.ROTATION_270:Surface.ROTATION_90);
+        return normalLandscape?android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE:android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE;
+    }
+
+    private void captureSessionDisplayOrientation(Intent startIntent) {
+        int supplied=startIntent.getIntExtra(EXTRA_SESSION_DISPLAY_ORIENTATION,
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        if(absoluteDisplayOrientation(supplied)) {
+            sessionDisplayOrientation=supplied;
+            return;
+        }
+        // The background quick launcher honors its saved video aspect. Preserve
+        // the actual sensor side when it matches; otherwise use that aspect's normal side.
+        int current=snapshotDisplayOrientation(this);
+        boolean landscape=SharedPreferencesManager.ORIENTATION_LANDSCAPE.equals(sharedPreferencesManager.getVideoOrientation());
+        boolean currentLandscape=current==android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                || current==android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE;
+        sessionDisplayOrientation=absoluteDisplayOrientation(current) && currentLandscape==landscape?current
+                :landscape?android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE:android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+    }
+    /** Read-only UI probes; do not start services or trust persisted recording flags. */
+    public static boolean hasPreviewOnlySession() {
+        RecordingService service = liveInstance;
+        return service != null && !service.isStopping && service.previewOnlyActive;
+    }
+
+    public static boolean isCameraCleanupInProgress() {
+        RecordingService service = liveInstance;
+        return service != null && (service.isStopping || service.isCameraResourceReleasing
+                || service.previewOnlyStopping || service.serviceStopRequested);
+    }
+
+    /** Recording teardown includes codec/muxer finalization after NONE is broadcast. */
+    public static boolean isRecordingFinalizing() {
+        RecordingService service = liveInstance;
+        return service != null && service.isStopping;
+    }
+
+    public static long getFinalizingTimelineMs() {
+        RecordingService service = liveInstance;
+        return service != null && service.isStopping ? service.finalizingTimelineMs : 0L;
+    }
+
+    private volatile boolean previewOnlyActive = false;
+    private volatile boolean previewOnlyStopping = false;
+    private volatile boolean serviceStopRequested = false;
+    private final java.util.concurrent.ConcurrentHashMap<CameraDevice, java.util.concurrent.CountDownLatch>
+            closingCameraSignals = new java.util.concurrent.ConcurrentHashMap<>();
     private boolean pendingPreviewOnlyStart = false;
     private volatile boolean previewSessionConfigInFlight = false;
     // Camera-open and preview-surface callbacks can both observe STARTING
@@ -219,6 +311,8 @@ public class RecordingService extends Service {
     private Integer runtimeExposureCompensation = null;
     private Boolean runtimeAeLock = null;
     private Integer runtimeAfMode = null;
+    // Each tap restoration belongs to one request/session and the latest user intent.
+    private volatile long tapFocusGeneration;
     private boolean pendingDeferredAeLockEnable = false;
     private long aeLockConvergenceToken = 0L;
     private boolean manualAeLockActive = false;
@@ -477,6 +571,8 @@ public class RecordingService extends Service {
      * setRepeatingRequest.
      */
     private void applyExposureCompensation(int evIndex) {
+        if (com.fadcam.utils.PersonalProSettings.usesManualExposure(sharedPreferencesManager, currentCameraCharacteristics,
+                sharedPreferencesManager.getSpecificVideoFrameRate(sharedPreferencesManager.getCameraSelection()))) return;
         int clamped = evIndex;
         if (currentCameraCharacteristics != null) {
             Range<Integer> range = currentCameraCharacteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
@@ -600,7 +696,7 @@ public class RecordingService extends Service {
                                         hs.setRepeatingBurst(highSpeedRequests, null, backgroundHandler);
                                         FLog.d(TAG, "Updated high-speed repeating burst with EV=" + clampedEv);
                                     } else {
-                                        captureSession.setRepeatingRequest(captureRequestBuilder.build(), null,
+                                        captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults,
                                                 backgroundHandler);
                                         FLog.d(TAG, "Updated standard repeating request with EV=" + clampedEv);
                                     }
@@ -628,7 +724,7 @@ public class RecordingService extends Service {
             } catch (Exception outerEx) {
                 // Final fallback: simple setRepeatingRequest
                 try {
-                    captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+                    captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
                 } catch (Exception fallbackEx) {
                     FLog.d(TAG, "Even fallback setRepeating failed: " + fallbackEx.getMessage());
                 }
@@ -648,6 +744,8 @@ public class RecordingService extends Service {
      * Toggle AE lock during a running session.
      */
     private void applyAeLock(boolean lock) {
+        if (com.fadcam.utils.PersonalProSettings.usesManualExposure(sharedPreferencesManager, currentCameraCharacteristics,
+                sharedPreferencesManager.getSpecificVideoFrameRate(sharedPreferencesManager.getCameraSelection()))) return;
         try {
             if (sharedPreferencesManager != null) {
                 sharedPreferencesManager.setSavedAeLock(lock);
@@ -672,12 +770,12 @@ public class RecordingService extends Service {
                     // Return to normal AE pipeline when manual lock is released.
                     captureRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                     captureRequestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
-                    captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+                    captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
                     manualAeLockActive = false;
                     FLog.d(TAG, "applyAeLock(false): released manual AE lock and restored AE_MODE_ON");
                 } else {
                     captureRequestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
-                    captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+                    captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
                 }
                 return;
             }
@@ -696,7 +794,7 @@ public class RecordingService extends Service {
                     }
                 }
                 captureRequestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
-                captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+                captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
                 applyExposureCompensation(evToUse);
                 FLog.d(TAG, "applyAeLock(true): refreshed EV while unlocked (index=" + evToUse
                         + "), waiting for AE convergence + exposure stability");
@@ -762,7 +860,7 @@ public class RecordingService extends Service {
                             boolean manualLocked = tryApplyManualExposureLock(exposureTimeNs, iso);
                             if (!manualLocked) {
                                 captureRequestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, true);
-                                captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+                                captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
                             }
                             FLog.d(TAG, "applyAeLock(true): lock enabled after convergence check. mode="
                                     + (manualLocked ? "manual_ae_off" : "ae_lock")
@@ -817,6 +915,7 @@ public class RecordingService extends Service {
      * Change AF mode (e.g., continuous video, off, etc.) when supported.
      */
     private void applyAfMode(int afMode) {
+        tapFocusGeneration++;
         try {
             if (sharedPreferencesManager != null) {
                 sharedPreferencesManager.setSavedAfMode(afMode);
@@ -838,6 +937,14 @@ public class RecordingService extends Service {
         if (!supported)
             return;
 
+        // Explicit AF selection also clears the MF intent shown by the controls.
+        // MF changes use ACTION_APPLY and keep AF OFF in PersonalProSettings.apply.
+        if (afMode != CaptureRequest.CONTROL_AF_MODE_OFF) {
+            com.fadcam.utils.PersonalProSettings.saveFocus(sharedPreferencesManager,
+                    sharedPreferencesManager.getCameraSelection(), -1f);
+            // saveFocus(AF) selects the default continuous mode; preserve the explicit selection.
+            sharedPreferencesManager.setSavedAfMode(afMode);
+        }
         // Track runtime AF mode to override saved preferences
         runtimeAfMode = afMode;
 
@@ -845,7 +952,9 @@ public class RecordingService extends Service {
             captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, afMode);
             // If switching to auto or continuous, ensure the AF trigger is reset
             captureRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE);
-            captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+            if(afMode!=CaptureRequest.CONTROL_AF_MODE_OFF)captureRequestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE,null);
+            com.fadcam.utils.PersonalProSettings.applyFocusArea(captureRequestBuilder,currentCameraCharacteristics,sharedPreferencesManager);
+            captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
         } catch (CameraAccessException | IllegalStateException e) {
             // ignore
         }
@@ -941,8 +1050,9 @@ public class RecordingService extends Service {
                 captureRequestBuilder.set(
                         android.hardware.camera2.CaptureRequest.CONTROL_ZOOM_RATIO,
                         clampedZoom);
+                com.fadcam.utils.PersonalProSettings.applyFocusArea(captureRequestBuilder,currentCameraCharacteristics,sharedPreferencesManager);
                 captureSession.setRepeatingRequest(
-                        captureRequestBuilder.build(), null, backgroundHandler);
+                        captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
 
                 CameraType currentCamera = sharedPreferencesManager.getCameraSelection();
                 sharedPreferencesManager.setSpecificZoomRatio(currentCamera, clampedZoom);
@@ -986,8 +1096,9 @@ public class RecordingService extends Service {
                                 android.hardware.camera2.CaptureRequest.CONTROL_ZOOM_RATIO, 1.0f);
                     }
 
+                    com.fadcam.utils.PersonalProSettings.applyFocusArea(captureRequestBuilder,currentCameraCharacteristics,sharedPreferencesManager);
                     captureSession.setRepeatingRequest(
-                            captureRequestBuilder.build(), null, backgroundHandler);
+                            captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
 
                     // Persist both zoom and pan
                     CameraType currentCamera = sharedPreferencesManager.getCameraSelection();
@@ -1003,8 +1114,9 @@ public class RecordingService extends Service {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 captureRequestBuilder.set(
                         android.hardware.camera2.CaptureRequest.CONTROL_ZOOM_RATIO, clampedZoom);
+                com.fadcam.utils.PersonalProSettings.applyFocusArea(captureRequestBuilder,currentCameraCharacteristics,sharedPreferencesManager);
                 captureSession.setRepeatingRequest(
-                        captureRequestBuilder.build(), null, backgroundHandler);
+                        captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
                 CameraType currentCamera = sharedPreferencesManager.getCameraSelection();
                 sharedPreferencesManager.setSpecificZoomRatio(currentCamera, clampedZoom);
                 FLog.d(TAG, "applyZoomAndPan: CONTROL_ZOOM_RATIO fallback (no sensor info) ratio=" + clampedZoom);
@@ -1031,6 +1143,7 @@ public class RecordingService extends Service {
      * regions + trigger.
      */
     private void performTapToFocus(float nx, float ny) {
+        if (com.fadcam.utils.PersonalProSettings.usesManualFocus(sharedPreferencesManager, sharedPreferencesManager.getCameraSelection(), currentCameraCharacteristics)) return;
         FLog.d(TAG, "performTapToFocus called with normalized coords: " + nx + ", " + ny);
 
         if (currentCameraCharacteristics == null || captureRequestBuilder == null || captureSession == null
@@ -1073,80 +1186,85 @@ public class RecordingService extends Service {
             sensorNY = ny;
         }
 
-        int x = activeArray.left + (int) (sensorNX * activeArray.width());
-        int y = activeArray.top + (int) (sensorNY * activeArray.height());
+        // Runtime zoom uses SCALER_CROP_REGION. Meter inside that visible crop,
+        // otherwise a tap at 2x still focuses a point in the unzoomed image.
+        Rect meteringBounds = new Rect(activeArray);
+        Rect crop = captureRequestBuilder.get(CaptureRequest.SCALER_CROP_REGION);
+        if (crop != null && !crop.isEmpty()) meteringBounds.intersect(crop);
+        int x = meteringBounds.left + (int) (sensorNX * meteringBounds.width());
+        int y = meteringBounds.top + (int) (sensorNY * meteringBounds.height());
 
         // Clamp coordinates to active array bounds before creating rectangle
         // This prevents IllegalArgumentException when normalized coords go out of bounds (>1.0)
-        x = Math.max(activeArray.left, Math.min(activeArray.right, x));
-        y = Math.max(activeArray.top, Math.min(activeArray.bottom, y));
+        x = Math.max(meteringBounds.left, Math.min(meteringBounds.right, x));
+        y = Math.max(meteringBounds.top, Math.min(meteringBounds.bottom, y));
 
         FLog.d(TAG, "Mapped to sensor coords: " + x + ", " + y + " (active array: " + activeArray + ")");
 
         // Create a small region around the tap point
-        int half = Math.max(10, Math.min(activeArray.width(), activeArray.height()) / 20);
+        int half = Math.max(10, Math.min(meteringBounds.width(), meteringBounds.height()) / 20);
         Rect area = new Rect(
-                Math.max(activeArray.left, x - half),
-                Math.max(activeArray.top, y - half),
-                Math.min(activeArray.right, x + half),
-                Math.min(activeArray.bottom, y + half));
+                Math.max(meteringBounds.left, x - half),
+                Math.max(meteringBounds.top, y - half),
+                Math.min(meteringBounds.right, x + half),
+                Math.min(meteringBounds.bottom, y + half));
 
         MeteringRectangle mr = new MeteringRectangle(area, MeteringRectangle.METERING_WEIGHT_MAX - 1);
+        final CaptureRequest.Builder tappedBuilder = captureRequestBuilder;
+        final CameraCaptureSession tappedSession = captureSession;
+        final CameraCharacteristics tappedCharacteristics = currentCameraCharacteristics;
+        int[] modes = tappedCharacteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
+        final boolean canTrigger = com.fadcam.utils.PersonalProSettings.contains(modes, CaptureRequest.CONTROL_AF_MODE_AUTO);
+        Integer maxAfRegions = tappedCharacteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF);
+        Integer maxAeRegions = tappedCharacteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
+        boolean canMeterAf = canTrigger && maxAfRegions != null && maxAfRegions > 0;
+        boolean canMeterAe = maxAeRegions != null && maxAeRegions > 0;
+        if (!canTrigger && !canMeterAe) return;
+        final long generation = ++tapFocusGeneration;
         try {
-            // Store the current AF mode to restore it later
-            Integer currentAfMode = captureRequestBuilder.get(CaptureRequest.CONTROL_AF_MODE);
-
-            // Set focus and metering regions
-            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, new MeteringRectangle[] { mr });
-            captureRequestBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, new MeteringRectangle[] { mr });
-
-            // Always switch to AUTO mode for tap-to-focus, regardless of current mode
-            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
-            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START);
-
-            FLog.d(TAG, "Tap-to-focus triggered at normalized coords: " + nx + ", " + ny + " -> sensor coords: " + x
-                    + ", " + y);
-
-            captureSession.capture(captureRequestBuilder.build(), null, backgroundHandler);
-
-            // After a short delay, restore the previous AF mode (or use runtime/saved
-            // preferences)
+            if (canMeterAf) tappedBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, new MeteringRectangle[] { mr });
+            if (canMeterAe) tappedBuilder.set(CaptureRequest.CONTROL_AE_REGIONS, new MeteringRectangle[] { mr });
+            if (!canTrigger) {
+                // Fixed-focus lenses can still meter exposure without an unsupported AUTO request.
+                tappedSession.setRepeatingRequest(tappedBuilder.build(), proCaptureResults, backgroundHandler);
+                return;
+            }
+            tappedBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+            tappedBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE);
+            // Keep the same mode/region on preview frames; the old continuous request
+            // would otherwise cancel this one-shot AUTO scan on its next frame.
+            tappedSession.setRepeatingRequest(tappedBuilder.build(), proCaptureResults, backgroundHandler);
+            tappedBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START);
+            try {
+                tappedSession.capture(tappedBuilder.build(), proCaptureResults, backgroundHandler);
+            } finally {
+                // START is a one-shot trigger. Zoom/EV updates must never replay it.
+                tappedBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE);
+            }
             if (backgroundHandler != null) {
                 backgroundHandler.postDelayed(() -> {
+                    if (generation != tapFocusGeneration || captureRequestBuilder != tappedBuilder
+                            || captureSession != tappedSession || currentCameraCharacteristics != tappedCharacteristics) return;
+                    if (com.fadcam.utils.PersonalProSettings.usesManualFocus(sharedPreferencesManager,
+                            sharedPreferencesManager.getCameraSelection(), tappedCharacteristics)) return;
                     try {
-                        // Restore AF mode: use runtime value if available, otherwise saved preference,
-                        // otherwise continuous
-                        int afModeToRestore = (runtimeAfMode != null) ? runtimeAfMode
-                                : (currentAfMode != null) ? currentAfMode
-                                        : CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO;
-
-                        // Verify the mode is supported
-                        int[] supportedModes = currentCameraCharacteristics
-                                .get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
-                        boolean isSupported = false;
-                        if (supportedModes != null) {
-                            for (int mode : supportedModes) {
-                                if (mode == afModeToRestore) {
-                                    isSupported = true;
-                                    break;
-                                }
-                            }
+                        int preferred = com.fadcam.utils.PersonalProSettings.isEnabled(sharedPreferencesManager)
+                                ? runtimeAfMode != null ? runtimeAfMode : sharedPreferencesManager.getSavedAfMode()
+                                : CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO;
+                        int restore = com.fadcam.utils.PersonalProSettings.automaticFocusMode(tappedCharacteristics, preferred);
+                        if (com.fadcam.utils.PersonalProSettings.contains(modes, restore)) {
+                            tappedBuilder.set(CaptureRequest.CONTROL_AF_MODE, restore);
+                            tappedBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE);
+                            com.fadcam.utils.PersonalProSettings.applyFocusArea(tappedBuilder,tappedCharacteristics,sharedPreferencesManager);
+                            tappedSession.setRepeatingRequest(tappedBuilder.build(), proCaptureResults, backgroundHandler);
                         }
-
-                        if (isSupported) {
-                            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, afModeToRestore);
-                            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER,
-                                    CameraMetadata.CONTROL_AF_TRIGGER_IDLE);
-                            captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
-                            FLog.d(TAG, "Restored AF mode to: " + afModeToRestore + " after tap-to-focus");
-                        }
-                    } catch (Exception e) {
-                        FLog.w(TAG, "Error restoring AF mode after tap-to-focus: " + e.getMessage());
+                    } catch (CameraAccessException | IllegalStateException | IllegalArgumentException e) {
+                        FLog.w(TAG, "Error restoring AF mode after tap-to-focus", e);
                     }
-                }, 1000); // 1 second delay to allow focus to complete
+                }, 1000);
             }
-        } catch (CameraAccessException | IllegalStateException e) {
-            // ignore
+        } catch (CameraAccessException | IllegalStateException | IllegalArgumentException e) {
+            FLog.w(TAG, "Tap focus unavailable", e);
         }
     }
 
@@ -1160,7 +1278,8 @@ public class RecordingService extends Service {
     // DB-DRIVEN: the video index tracks per-file finalization state (0=pending,
     // 1=ok, 2=unrepairable). The scan ONLY touches rows still pending — confirmed
     // files are never re-examined, so repeated scans cost nothing. Live recordings
-    // are excluded by the isRecordingInProgress guard and the is_temporary flag.
+    // are excluded by actual service state, the persisted recording guard and
+    // the is_temporary flag. PAUSED still owns an open, resumable muxer.
 
     private boolean staleFinalizeAttempted = false;
 
@@ -1168,6 +1287,11 @@ public class RecordingService extends Service {
         if (staleFinalizeAttempted) return;
         staleFinalizeAttempted = true;
         runSelfHealingScan(this, null);
+    }
+
+    private static boolean hasLiveRecordingWriter() {
+        RecordingService service=liveInstance;
+        return service!=null && (service.recordingState!=RecordingState.NONE || service.isStopping);
     }
 
     /**
@@ -1182,7 +1306,7 @@ public class RecordingService extends Service {
             final android.content.Context app = context.getApplicationContext();
             final SharedPreferencesManager prefs = SharedPreferencesManager.getInstance(app);
             // Never scan while a recording is active — its file may be mid-write.
-            if (prefs.isRecordingInProgress()) {
+            if (prefs.isRecordingInProgress() || hasLiveRecordingWriter()) {
                 if (onDone != null) onDone.run();
                 return;
             }
@@ -1265,6 +1389,9 @@ public class RecordingService extends Service {
 
     private static void doSelfHealingScan(final android.content.Context app) {
                     final SharedPreferencesManager prefs = SharedPreferencesManager.getInstance(app);
+                    // A queued scan may outlive the entry check. Pause clears the
+                    // persisted flag but keeps the session's file open for resume.
+                    if (prefs.isRecordingInProgress() || hasLiveRecordingWriter()) return;
                     com.fadcam.data.VideoIndexRepository repo =
                             com.fadcam.data.VideoIndexRepository.getInstance(app);
                     // One-time cleanup: earlier builds marked SAF files "unrepairable"
@@ -1288,6 +1415,9 @@ public class RecordingService extends Service {
                     final long retryAfter = now + REPAIR_RETRY_DELAY_MS;
                     for (String uriString : pending) {
                         try {
+                            // Index queries/observer scheduling can race with a new
+                            // session or stop. Recheck before opening any pending URI.
+                            if (prefs.isRecordingInProgress() || hasLiveRecordingWriter()) return;
                             // Never touch a file the service is still finalizing
                             // (manual stop in progress) — scanning it would
                             // double-finalize and raise a false repair banner.
@@ -1355,10 +1485,8 @@ public class RecordingService extends Service {
                             try { repo.markUnrepairableWithRetry(uriString, retryAfter); } catch (Exception ignored) {}
                         }
                     }
-                    // A stale in-progress session that produced no file is dead.
-                    if (prefs.isRecordingInProgress()) {
-                        prefs.setRecordingInProgress(false);
-                    }
+                    // Recording lifecycle flags belong to the service. A new
+                    // session may have started since this scan's last row.
     }
 
     /** Extracts a clean file name from file:// or content:// URIs for user messages. */
@@ -1565,7 +1693,8 @@ public class RecordingService extends Service {
             if (!wasPreviewOnlyActive) {
                 // Idempotent stop: still notify UI to reconcile any stale local state.
                 broadcastOnPreviewOnlyStopped();
-                if (!isWorkingInProgress()) {
+                if (!isWorkingInProgress() && !isStopping && !isCameraResourceReleasing) {
+                    serviceStopRequested = true;
                     stopSelf();
                 }
             }
@@ -1696,6 +1825,7 @@ public class RecordingService extends Service {
                 // Update the UI and Service state atomically
                 recordingStartDispatched.set(false);
                 recordingHaptics.beginSession();
+                captureSessionDisplayOrientation(intent);
                 recordingState = RecordingState.STARTING;
                 // Clear a stale stopping flag from a previous recording that
                 // may still be cleaning up asynchronously on a background thread.
@@ -1841,7 +1971,10 @@ public class RecordingService extends Service {
         } else if (Constants.BROADCAST_ON_RECORDING_STATE_REQUEST.equals(action)) {
             // Handle UI state sync requests
             broadcastOnRecordingStateCallback();
-            if (!isWorkingInProgress()) {
+            // NONE is broadcast before asynchronous codec/muxer/camera cleanup
+            // finishes. A read-only state request must not destroy that work.
+            if (!isWorkingInProgress() && !isStopping && !isCameraResourceReleasing) {
+                serviceStopRequested = true;
                 stopSelf();
             }
             return START_STICKY;
@@ -1864,6 +1997,24 @@ public class RecordingService extends Service {
                 }
             }
             toggleRecordingTorch();
+            return START_STICKY;
+        } else if (com.fadcam.utils.PersonalProSettings.ACTION_APPLY.equals(action)) {
+            tapFocusGeneration++;
+            aeLockConvergenceToken++;
+            pendingDeferredAeLockEnable = false;
+            runtimeAeLock = null;
+            runtimeAfMode = null;
+            if (captureRequestBuilder != null && captureSession != null) {
+                applySavedCameraPrefsToBuilder(captureRequestBuilder);
+                try {
+                    CaptureRequest request = captureRequestBuilder.build();
+                    if (captureSession instanceof android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession) {
+                        android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession highSpeed =
+                                (android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession) captureSession;
+                        highSpeed.setRepeatingBurst(highSpeed.createHighSpeedRequestList(request), null, backgroundHandler);
+                    } else captureSession.setRepeatingRequest(request, proCaptureResults, backgroundHandler);
+                } catch (CameraAccessException | IllegalStateException | IllegalArgumentException e) { FLog.w(TAG, "Pro controls unavailable", e); }
+            }
             return START_STICKY;
         } else if (Constants.INTENT_ACTION_SET_EXPOSURE_COMPENSATION.equals(action)) {
             // Set exposure compensation index while recording
@@ -2291,6 +2442,7 @@ public class RecordingService extends Service {
             return;
         }
 
+        finalizingTimelineMs = getEffectiveTimelineMs();
         isStopping = true;
         recordingHaptics.onRecordingStopped(this);
         FLog.i(TAG, ">> stopRecording sequence initiated. Current state: " + recordingState);
@@ -2387,12 +2539,11 @@ public class RecordingService extends Service {
                     }
                 }
 
-                // Give some time for the session to close
-                try {
-                    Thread.sleep(50);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
+                // Closing a session is asynchronous. Keep its GL input Surface
+                // alive until the device's actual onClosed callback has arrived.
+                // Releasing that Surface while the telephoto HAL still produces
+                // frames can reset the Samsung camera provider.
+                closeCameraBeforePipelineShutdown();
                 
                 // Stop and release the GL pipeline
                 if (glRecordingPipeline != null) {
@@ -2462,18 +2613,6 @@ public class RecordingService extends Service {
 
                 // REMUX: Removed as per user request (writing directly to .mp4 now)
                 // com.fadcam.media.VideoFileProcessor.CRASH_SAFE_EXTENSION cleanup check removed.
-
-                // Close the camera device last
-                if (cameraDevice != null) {
-                    try {
-                        cameraDevice.close();
-                    } catch (Exception e) {
-                        FLog.e(TAG, "Error closing camera device", e);
-                    } finally {
-                        cameraDevice = null;
-                        isCameraOpen = false;
-                    }
-                }
 
                 // Stop and reset NoiseMonitor singleton
                 if (noiseMonitor != null) {
@@ -3817,14 +3956,10 @@ public class RecordingService extends Service {
      * coordinates.
      */
     private int getDisplayToSensorRotation() {
-        int displayRotationDeg = 0;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            android.view.Display display = getDisplay();
-            if (display != null) {
-                displayRotationDeg = 90 * display.getRotation();
-            }
-        }
-        int total = (getCurrentSensorOrientationDegrees() + displayRotationDeg) % 360;
+        int displayRotationDeg = 90 * com.fadcam.utils.CameraDisplayOrientation.currentRotation(this);
+        // Match the GL renderer's sensor-minus-display transform. Service.getDisplay()
+        // is not valid for a non-visual context; use its WindowManager display instead.
+        int total = (getCurrentSensorOrientationDegrees() - displayRotationDeg + 360) % 360;
         if (currentCameraCharacteristics != null) {
             Integer facing = currentCameraCharacteristics.get(
                     CameraCharacteristics.LENS_FACING);
@@ -3926,6 +4061,7 @@ public class RecordingService extends Service {
             FLog.i(TAG, "No active recording or background processing detected. Stopping service.");
             // Remove from foreground first to avoid ANR if stopSelf takes time
             com.fadcam.Utils.stopForegroundCompat(this, true);
+            serviceStopRequested = true;
             stopSelf(); // Stop the service as its work is done.
         } else {
             FLog.d(TAG, "Service continues running (Tasks active).");
@@ -3982,118 +4118,7 @@ public class RecordingService extends Service {
                 }
             }
             
-            Set<String> allAvailableCameraIds = new HashSet<>(Arrays.asList(basicCameraIds));
-
-            // On Android P+, also include physical cameras from logical cameras
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                for (String id : basicCameraIds) {
-                    try {
-                        CameraCharacteristics chars = cameraManager.getCameraCharacteristics(id);
-                        Set<String> physicalIds = chars.getPhysicalCameraIds();
-                        if (physicalIds != null && !physicalIds.isEmpty()) {
-                            allAvailableCameraIds.addAll(physicalIds);
-                            // physical camera log removed  " + id + ": " + physicalIds);
-                        }
-                    } catch (Exception e) {
-                        FLog.w(TAG, "Error checking physical IDs for camera " + id, e);
-                    }
-                }
-            }
-
-            String[] availableCameraIds = allAvailableCameraIds.toArray(new String[0]);
-
-            if (selectedType == CameraType.FRONT) {
-                for (String id : availableCameraIds) {
-                    CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
-                    Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-                    if (facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT) {
-                        cameraToOpenId = id;
-                        break;
-                    }
-                }
-            } else { // CameraType.BACK
-                String preferredBackId = sharedPreferencesManager.getSelectedBackCameraId();
-                boolean isValidAndAvailable = false;
-
-                // First, check if the preferred camera ID exists in our available cameras
-                for (String id : availableCameraIds) {
-                    if (id.equals(preferredBackId)) {
-                        try {
-                            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
-                            Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-
-                            // For physical cameras, they might not have LENS_FACING_BACK set
-                            // but if they're in our availableCameraIds and were detected as back cameras
-                            // in SettingsFragment, we should trust that they're valid back cameras
-                            if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
-                                isValidAndAvailable = true;
-                                break;
-                            } else {
-                                // For physical cameras, check if this ID was part of a logical back camera
-                                // If it's in our availableCameraIds, it means it was detected as a back camera
-                                FLog.w(TAG, "Preferred back ID " + preferredBackId + " exists but LENS_FACING is: "
-                                        + facing);
-
-                                // Additional validation: check if this is a physical camera from a logical back
-                                // camera
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                                    boolean isPhysicalBackCamera = isPhysicalBackCamera(preferredBackId, basicCameraIds,
-                                            cameraManager);
-                                    if (isPhysicalBackCamera) {
-                                        isValidAndAvailable = true;
-                                        FLog.d(TAG, "Preferred camera ID '" + preferredBackId
-                                                + "' validated as physical back camera");
-                                        break;
-                                    }
-                                }
-                            }
-                        } catch (CameraAccessException e) {
-                            FLog.e(TAG, "Error getting characteristics for preferred camera " + preferredBackId, e);
-                        }
-                    }
-                }
-
-                if (isValidAndAvailable) {
-                    cameraToOpenId = preferredBackId;
-                } else {
-                    FLog.w(TAG,
-                            "Preferred back camera ID '" + preferredBackId
-                                    + "' is invalid or unavailable. Falling back to default ID '"
-                                    + Constants.DEFAULT_BACK_CAMERA_ID + "'.");
-                    cameraToOpenId = Constants.DEFAULT_BACK_CAMERA_ID;
-                    boolean defaultExistsAndIsBack = false;
-                    for (String id : availableCameraIds) {
-                        if (id.equals(cameraToOpenId)) {
-                            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
-                            Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-                            if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
-                                defaultExistsAndIsBack = true;
-                            }
-                            break;
-                        }
-                    }
-                    if (!defaultExistsAndIsBack) {
-                        FLog.e(TAG, "Critical: Default back camera ID '" + cameraToOpenId
-                                + "' not found or not back-facing! Cannot select default back camera.");
-                        String fallbackBackId = null;
-                        for (String id : availableCameraIds) {
-                            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
-                            Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-                            if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
-                                FLog.w(TAG, "Using first available back camera as final fallback: " + id);
-                                fallbackBackId = id;
-                                break;
-                            }
-                        }
-                        if (fallbackBackId != null) {
-                            cameraToOpenId = fallbackBackId;
-                        } else {
-                            cameraToOpenId = null;
-                            FLog.e(TAG, "Could not find any back-facing camera.");
-                        }
-                    }
-                }
-            }
+            cameraToOpenId = sharedPreferencesManager.resolveSelectedCameraId(cameraManager, selectedType);
 
             if (cameraToOpenId == null) {
                 FLog.e(TAG, "Could not determine a valid camera ID to open for selected type: " + selectedType);
@@ -4117,7 +4142,13 @@ public class RecordingService extends Service {
             final int MAX_RETRIES = 3;
             final long RETRY_DELAY_MS = 2000;
             int attempt = 0;
-            String finalCameraToOpenId = cameraToOpenId;
+            com.fadcam.utils.CameraLensCatalog.Route route = com.fadcam.utils.CameraLensCatalog.resolve(cameraManager, cameraToOpenId);
+            if (route.physicalId != null && sharedPreferencesManager.getSpecificVideoFrameRate(selectedType) >= 120) {
+                // Constrained high-speed sessions cannot carry physical OutputConfigurations.
+                // Never silently record from the logical camera instead of the selected lens.
+                throw new IllegalArgumentException("Select a regular frame rate for this physical lens");
+            }
+            String finalCameraToOpenId = route.deviceId;
 
             while (attempt < MAX_RETRIES) {
                 try {
@@ -4205,6 +4236,12 @@ public class RecordingService extends Service {
     private final CameraDevice.StateCallback cameraStateCallback = new CameraDevice.StateCallback() {
         @Override
         public void onOpened(@NonNull CameraDevice camera) {
+            if (previewOnlyStopping || isStopping ||
+                    (recordingState == RecordingState.NONE && !previewOnlyActive && !pendingStartRecording)) {
+                FLog.d(TAG, "Ignoring camera-open callback after its preview was stopped");
+                camera.close();
+                return;
+            }
             cameraDevice = camera;
             isCameraOpen = true;
 
@@ -4416,6 +4453,8 @@ public class RecordingService extends Service {
 
         @Override
         public void onClosed(@NonNull CameraDevice camera) {
+            java.util.concurrent.CountDownLatch signal = closingCameraSignals.remove(camera);
+            if (signal != null) signal.countDown();
             isCameraOpen = false;
 
             // If we were in segment rollover, continue with the rollover process
@@ -4760,6 +4799,10 @@ public class RecordingService extends Service {
     private final CameraCaptureSession.StateCallback captureSessionCallback = new CameraCaptureSession.StateCallback() {
         @Override
         public void onConfigured(@NonNull CameraCaptureSession session) {
+            if (previewOnlyStopping || session.getDevice() != cameraDevice) {
+                session.close();
+                return;
+            }
             previewSessionConfigInFlight = false;
             if (isStopping || cameraDevice == null || (recordingState == RecordingState.NONE && !previewOnlyActive)) {
                 FLog.w(TAG,
@@ -4792,7 +4835,7 @@ public class RecordingService extends Service {
                 }
                 // Start repeating request
                 try {
-                    session.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+                    session.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
                     maybeApplyDeferredAeLockAfterSessionStart("standard");
                 } catch (IllegalStateException ise) {
                     FLog.e(TAG, "setRepeatingRequest failed: session likely closed", ise);
@@ -4822,6 +4865,7 @@ public class RecordingService extends Service {
 
         @Override
         public void onConfigureFailed(@NonNull CameraCaptureSession session) {
+            if (previewOnlyStopping || session.getDevice() != cameraDevice) return;
             previewSessionConfigInFlight = false;
             if (isStopping)
                 return;
@@ -5043,7 +5087,13 @@ public class RecordingService extends Service {
             int height = intent.getIntExtra("SURFACE_HEIGHT", -1);
             // Update the GL pipeline with the new dimensions if available
             if (glRecordingPipeline != null && validNewSurface && width > 0 && height > 0) {
-                glRecordingPipeline.updateSurfaceDimensions(width, height);
+                int rotation = intent.getIntExtra(EXTRA_PREVIEW_DISPLAY_ROTATION, -1);
+                if (previewOnlyActive && recordingState == RecordingState.NONE
+                        && rotation >= Surface.ROTATION_0 && rotation <= Surface.ROTATION_270) {
+                    glRecordingPipeline.updatePreviewOnlyDisplay(rotation, width, height);
+                } else {
+                    glRecordingPipeline.updateSurfaceDimensions(width, height);
+                }
             }
         }
     }
@@ -5811,7 +5861,7 @@ public class RecordingService extends Service {
                     if (currentHasFlash) {
                         captureRequestBuilder.set(CaptureRequest.FLASH_MODE,
                                 isRecordingTorchEnabled ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
-                        captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+                        captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
                     } else {
                         // Front camera without flash — use system-level torch on back camera
                         try {
@@ -6256,6 +6306,9 @@ public class RecordingService extends Service {
     private void createHighSpeedSession(List<Surface> surfaces, CameraCharacteristics characteristics,
             int targetFrameRate, CameraType cameraType) {
         try {
+            proCaptureResults = com.fadcam.utils.PersonalCameraTelemetry.callback(cameraType,
+                    cameraType == CameraType.FRONT ? "front" : sharedPreferencesManager.getSelectedBackCameraId());
+
             // For high-speed recording, we need a constrained high-speed capture session
             FLog.d(TAG, "Creating constrained high-speed session for " + targetFrameRate + "fps");
 
@@ -6331,6 +6384,8 @@ public class RecordingService extends Service {
     private void createStandardSession(List<Surface> surfaces, int targetFrameRate,
             CameraCharacteristics characteristics, CameraType cameraType) {
         try {
+            proCaptureResults = com.fadcam.utils.PersonalCameraTelemetry.callback(cameraType,
+                    cameraType == CameraType.FRONT ? "front" : sharedPreferencesManager.getSelectedBackCameraId());
             // Create standard request builder
             captureRequestBuilder = cameraDevice.createCaptureRequest(
                     previewOnlyActive ? CameraDevice.TEMPLATE_PREVIEW : CameraDevice.TEMPLATE_RECORD);
@@ -6368,9 +6423,9 @@ public class RecordingService extends Service {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                 java.util.List<android.hardware.camera2.params.OutputConfiguration> outputs =
                         new java.util.ArrayList<>();
-                for (android.view.Surface s : surfaces) {
-                    outputs.add(new android.hardware.camera2.params.OutputConfiguration(s));
-                }
+                com.fadcam.utils.CameraLensCatalog.Route route = com.fadcam.utils.CameraLensCatalog.resolve(cameraManager,
+                        getCameraId(cameraManager, cameraType));
+                for (android.view.Surface s : surfaces) outputs.add(route.output(s));
                 android.hardware.camera2.params.SessionConfiguration sessionConfig =
                         new android.hardware.camera2.params.SessionConfiguration(
                                 android.hardware.camera2.params.SessionConfiguration.SESSION_REGULAR,
@@ -6486,6 +6541,12 @@ public class RecordingService extends Service {
             } else {
                 FLog.e(TAG, "applySavedCameraPrefsToBuilder: currentCameraCharacteristics is null!");
             }
+        if (com.fadcam.utils.PersonalProSettings.apply(builder, currentCameraCharacteristics,
+                sharedPreferencesManager, sharedPreferencesManager.getSpecificVideoFrameRate(sharedPreferencesManager.getCameraSelection()))) {
+            pendingDeferredAeLockEnable = false;
+            aeLockConvergenceToken++;
+            if (glRecordingPipeline != null) glRecordingPipeline.setExposureCompensation(0f);
+        }
         } catch (Exception e) {
             FLog.w(TAG, "Error applying camera prefs: " + e.getMessage());
         }
@@ -6499,6 +6560,8 @@ public class RecordingService extends Service {
      *
      * Tagged "FadCamEIS" for logcat grepping to verify the feature is active.
      */
+    private CameraCaptureSession.CaptureCallback proCaptureResults;
+
     private void applyVideoStabilization(CaptureRequest.Builder builder) {
         try {
             if (builder == null || currentCameraCharacteristics == null) {
@@ -6508,42 +6571,11 @@ public class RecordingService extends Service {
             boolean prefEnabled = sharedPreferencesManager != null
                     && sharedPreferencesManager.isVideoStabilizationEnabled();
 
-            boolean eisSupported = false;
-            int[] stabModes = currentCameraCharacteristics.get(
-                    CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES);
-            if (stabModes != null) {
-                for (int m : stabModes) {
-                    if (m == CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) {
-                        eisSupported = true;
-                        break;
-                    }
-                }
-            }
-            int eisMode = (prefEnabled && eisSupported)
-                    ? CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
-                    : CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF;
-            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, eisMode);
+            com.fadcam.utils.PersonalStabilization.apply(builder, currentCameraCharacteristics, prefEnabled);
+            FLog.i("FadCamEIS", "Exclusive stabilization -> pref=" + prefEnabled
+                    + " eis=" + builder.get(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE)
+                    + " ois=" + builder.get(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE));
 
-            boolean oisSupported = false;
-            int[] oisModes = currentCameraCharacteristics.get(
-                    CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION);
-            if (oisModes != null) {
-                for (int m : oisModes) {
-                    if (m == CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) {
-                        oisSupported = true;
-                        break;
-                    }
-                }
-            }
-            int oisMode = (prefEnabled && oisSupported)
-                    ? CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
-                    : CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF;
-            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, oisMode);
-
-            FLog.i("FadCamEIS", "VideoStab applied -> pref=" + prefEnabled
-                    + " eisSupported=" + eisSupported + " eis=" + eisMode
-                    + " oisSupported=" + oisSupported + " ois=" + oisMode
-                    + " cameraId=" + (cameraDevice != null ? cameraDevice.getId() : "null"));
         } catch (Throwable t) {
             // Catch Throwable: a stabilization bug must never crash the recorder.
             FLog.w("FadCamEIS", "applyVideoStabilization failed, falling back to OFF: " + t.getMessage());
@@ -6564,7 +6596,7 @@ public class RecordingService extends Service {
             }
             applyVideoStabilization(captureRequestBuilder);
             captureSession.setRepeatingRequest(
-                    captureRequestBuilder.build(), null, backgroundHandler);
+                    captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
             FLog.i("FadCamEIS", "Repeating request re-issued with new stabilization state");
         } catch (Throwable t) {
             FLog.w("FadCamEIS", "reapplyVideoStabilizationToSession failed safely: " + t.getMessage());
@@ -6624,7 +6656,7 @@ public class RecordingService extends Service {
             captureRequestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
             captureRequestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, clampedExp);
             captureRequestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, clampedIso);
-            captureSession.setRepeatingRequest(captureRequestBuilder.build(), null, backgroundHandler);
+            captureSession.setRepeatingRequest(captureRequestBuilder.build(), proCaptureResults, backgroundHandler);
             manualAeLockActive = true;
             FLog.d(TAG, "Manual AE lock applied: exposureNs=" + clampedExp + ", iso=" + clampedIso);
             return true;
@@ -6697,13 +6729,24 @@ public class RecordingService extends Service {
      * Apply zoom settings for the specified camera type
      */
     private void applyZoomSettings(CaptureRequest.Builder builder, CameraType cameraType) {
-        // Get zoom ratio from settings for the specific camera type
-        float zoomRatio = sharedPreferencesManager.getSpecificZoomRatio(cameraType);
-
-        // Apply zoom ratio to the capture request
-        // CONTROL_ZOOM_RATIO was added in Android 11 (API 30)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio);
+        float zoom = sharedPreferencesManager.getSpecificZoomRatio(cameraType);
+        if (currentCameraCharacteristics == null) return;
+        android.util.Range<Float> range = Build.VERSION.SDK_INT >= 30
+                ? currentCameraCharacteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) : null;
+        Float max = currentCameraCharacteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
+        zoom = Math.max(range != null ? range.getLower() : 1f,
+                Math.min(range != null ? range.getUpper() : max != null ? max : 1f, zoom));
+        android.graphics.Rect active = currentCameraCharacteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+        if (zoom >= 1f && active != null) {
+            int w = Math.max(1, Math.round(active.width() / zoom));
+            int h = Math.max(1, Math.round(active.height() / zoom));
+            int cx = active.centerX(), cy = active.centerY();
+            // Personal lens selection resets pan to zero; upstream saved pan remains a runtime control.
+            builder.set(CaptureRequest.SCALER_CROP_REGION, new android.graphics.Rect(cx - w / 2, cy - h / 2, cx - w / 2 + w, cy - h / 2 + h));
+            if (Build.VERSION.SDK_INT >= 30) builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, 1f);
+        } else if (Build.VERSION.SDK_INT >= 30) {
+            if (active != null) builder.set(CaptureRequest.SCALER_CROP_REGION, active);
+            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom);
         }
     }
 
@@ -6739,20 +6782,7 @@ public class RecordingService extends Service {
         }
 
         try {
-            if (cameraType == CameraType.BACK) {
-                // For back camera, use the selected back camera ID
-                return sharedPreferencesManager.getSelectedBackCameraId();
-            } else {
-                // For front camera, find the first front-facing camera
-                String[] cameraIds = cameraManager.getCameraIdList();
-                for (String id : cameraIds) {
-                    CameraCharacteristics chars = cameraManager.getCameraCharacteristics(id);
-                    Integer facing = chars.get(CameraCharacteristics.LENS_FACING);
-                    if (facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT) {
-                        return id;
-                    }
-                }
-            }
+            return sharedPreferencesManager.resolveSelectedCameraId(cameraManager,cameraType);
         } catch (Exception e) {
             FLog.e(TAG, "Error finding camera ID", e);
         }
@@ -6830,7 +6860,8 @@ public class RecordingService extends Service {
             return;
         }
         previewOnlyActive = false;
-        releasePreviewOnlyGlPipeline();
+        previewOnlyStopping = true;
+        previewSessionConfigInFlight = false;
         try {
             if (captureSession != null) {
                 try {
@@ -6848,9 +6879,31 @@ public class RecordingService extends Service {
         } catch (Exception e) {
             FLog.w(TAG, "Failed while stopping preview-only mode", e);
         }
+        releasePreviewOnlyGlPipeline();
         broadcastOnPreviewOnlyStopped();
         if (!isWorkingInProgress()) {
             stopSelf();
+        }
+    }
+
+    /** Called only on the recording cleanup worker, never the UI thread. */
+    private void closeCameraBeforePipelineShutdown() {
+        CameraDevice closing = cameraDevice;
+        if (closing == null) return;
+        java.util.concurrent.CountDownLatch signal = new java.util.concurrent.CountDownLatch(1);
+        closingCameraSignals.put(closing, signal);
+        try {
+            closing.close();
+            if (cameraDevice == closing) cameraDevice = null;
+            isCameraOpen = false;
+            if (!signal.await(2, java.util.concurrent.TimeUnit.SECONDS))
+                FLog.w(TAG, "Camera close acknowledgement timed out during recording cleanup");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException error) {
+            FLog.w(TAG, "Camera close failed during recording cleanup", error);
+        } finally {
+            closingCameraSignals.remove(closing, signal);
         }
     }
 
@@ -7167,8 +7220,8 @@ public class RecordingService extends Service {
         try {
             if (ActivityCompat.checkSelfPermission(this,
                     Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
-                    ActivityCompat.checkSelfPermission(this,
-                            Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    (sharedPreferencesManager.isRecordAudioEnabled() && ActivityCompat.checkSelfPermission(this,
+                            Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)) {
                 FLog.e(TAG, "Permissions missing, cannot start recording.");
                 Toast.makeText(this, getString(R.string.toast_permissions_required), Toast.LENGTH_LONG).show();
                 recordingState = RecordingState.NONE;
@@ -7528,7 +7581,8 @@ public class RecordingService extends Service {
     private void tryReconnectCamera(String cameraId) {
         try {
             FLog.d(TAG, "Attempting to reconnect camera: " + cameraId);
-            cameraManager.openCamera(cameraId, cameraStateCallback, backgroundHandler);
+            cameraManager.openCamera(com.fadcam.utils.CameraLensCatalog.resolve(cameraManager, cameraId).deviceId,
+                    cameraStateCallback, backgroundHandler);
         } catch (Exception e) {
             FLog.e(TAG, "Error reconnecting to camera", e);
         }

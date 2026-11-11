@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:theme="@style/ThemeOverlay.PersonalSamsungGallery"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+    <LinearLayout android:id="@+id/gallery_video_bottom_dock"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_gravity="bottom" android:orientation="vertical">
+        <FrameLayout android:id="@+id/gallery_video_preview_row"
+            android:layout_width="match_parent" android:layout_height="48dp"
+            android:layout_marginBottom="12dp" android:layout_marginHorizontal="16dp">
+            <LinearLayout android:id="@id/exo_center_controls"
+                android:layout_width="wrap_content" android:layout_height="38dp"
+                android:layout_gravity="center" android:gravity="center_vertical"
+                android:paddingStart="8dp" android:paddingEnd="16dp"
+                android:orientation="horizontal" android:background="@drawable/gallery_video_preview_pill">
+                <ImageButton android:id="@id/exo_play_pause"
+                    android:layout_width="36dp" android:layout_height="38dp"
+                    android:padding="5dp" android:src="@drawable/gallery_viewer_play"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/exo_controls_play_description" />
+                <LinearLayout android:id="@id/exo_time"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:gravity="center_vertical" android:orientation="horizontal">
+                    <TextView android:id="@id/exo_position" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:singleLine="true" android:text="00:00" android:textColor="#FCFCFC" android:textSize="14sp" />
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:singleLine="true" android:text=" / " android:textColor="#AFFFFFFF" android:textSize="14sp" />
+                    <TextView android:id="@id/exo_duration" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:singleLine="true" android:text="00:00" android:textColor="#AFFFFFFF" android:textSize="14sp" />
+                </LinearLayout>
+            </LinearLayout>
+            <ImageButton android:id="@+id/gallery_video_mute" android:layout_width="38dp" android:layout_height="38dp"
+                android:layout_gravity="end|center_vertical" android:padding="8dp"
+                android:src="@drawable/gallery_viewer_sound_off" app:tint="@android:color/white"
+                android:background="@drawable/gallery_video_preview_pill" android:contentDescription="@string/viewer_unmute" />
+        </FrameLayout>
+        <FrameLayout android:id="@+id/player_waveform_container" android:layout_width="match_parent"
+            android:layout_height="40dp" android:visibility="gone">
+            <com.google.android.material.slider.Slider android:id="@+id/material_time_slider"
+                android:layout_width="match_parent" android:layout_height="match_parent"
+                android:valueFrom="0" android:valueTo="100" android:stepSize="0"
+                android:contentDescription="@string/viewer_seek" app:thumbRadius="3dp"
+                app:thumbWidth="6dp" app:thumbHeight="6dp" app:trackHeight="2dp"
+                app:haloRadius="12dp" app:labelBehavior="gone" />
+        </FrameLayout>
+        <FrameLayout android:id="@+id/gallery_media_strip_frame" android:layout_width="match_parent" android:layout_height="60dp">
+            <com.fadcam.ui.GalleryMediaStrip android:id="@+id/gallery_media_strip"
+                android:layout_width="match_parent" android:layout_height="match_parent" />
+            <View android:id="@+id/gallery_frame_cursor" android:layout_width="2dp" android:layout_height="58dp"
+                android:layout_gravity="center" android:background="@android:color/white"
+                android:visibility="gone" android:importantForAccessibility="no" />
+        </FrameLayout>
+    </LinearLayout>
+</FrameLayout>

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.fadcam.ui.GalleryInlineLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:theme="@style/ThemeOverlay.PersonalSamsungGallery"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent" android:background="#FCFCFF">
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/player_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#FCFCFF"
+        app:shutter_background_color="#FCFCFF"
+        app:controller_layout_id="@layout/gallery_video_control_view"
+        app:use_controller="true"
+        app:play_icon="@drawable/gallery_viewer_play"
+        app:pause_icon="@drawable/gallery_viewer_pause"
+        app:show_timeout="3000"
+        app:show_buffering="never"
+        app:keep_content_on_player_reset="true"
+        app:resize_mode="fit"
+        app:bar_height="4dp"
+        app:bar_gravity="bottom"
+        app:touch_target_height="26dp"
+        />
+
+    <ImageButton
+        android:id="@+id/back_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:src="@drawable/gallery_viewer_back"
+        android:background="@drawable/gallery_video_action_surface"
+        android:padding="16dp"
+        android:layout_margin="4dp"
+        android:tint="#010102" app:tint="#010102" />
+
+    <LinearLayout android:id="@+id/gallery_video_top_actions"
+        android:layout_width="wrap_content" android:layout_height="48dp"
+        android:layout_gravity="top|end" android:layout_margin="4dp"
+        android:paddingHorizontal="4dp" android:gravity="center_vertical"
+        android:orientation="horizontal" android:background="@drawable/gallery_video_action_surface">
+        <ImageButton android:id="@+id/gallery_viewer_favorite" android:layout_width="40dp" android:layout_height="48dp"
+            android:padding="9dp" android:src="@drawable/gallery_favorite_outline" android:tint="#010102" app:tint="#010102"
+            android:contentDescription="@string/viewer_add_favorite" android:background="?attr/selectableItemBackgroundBorderless" />
+        <ImageButton android:id="@+id/gallery_viewer_edit" android:layout_width="40dp" android:layout_height="48dp"
+            android:padding="9dp" android:src="@drawable/gallery_edit_outline" android:tint="#010102" app:tint="#010102"
+            android:contentDescription="@string/viewer_edit" android:background="?attr/selectableItemBackgroundBorderless" />
+        <ImageButton android:id="@+id/gallery_viewer_share" android:layout_width="40dp" android:layout_height="48dp"
+            android:padding="9dp" android:src="@drawable/gallery_share_outline" android:tint="#010102" app:tint="#010102"
+            android:contentDescription="@string/gallery_share" android:background="?attr/selectableItemBackgroundBorderless" />
+        <ImageButton android:id="@+id/gallery_viewer_delete" android:layout_width="40dp" android:layout_height="48dp"
+            android:padding="9dp" android:src="@drawable/gallery_delete_outline" android:tint="#010102" app:tint="#010102"
+            android:contentDescription="@string/gallery_delete" android:background="?attr/selectableItemBackgroundBorderless" />
+        <ImageButton android:id="@+id/info_button" android:layout_width="40dp" android:layout_height="48dp"
+            android:padding="9dp" android:src="@drawable/ic_more_vert" android:tint="#010102" app:tint="#010102"
+            android:contentDescription="@string/gallery_more" android:background="?attr/selectableItemBackgroundBorderless" />
+    </LinearLayout>
+
+    <!-- Reset zoom button (appears when video is zoomed) -->
+    <ImageButton
+        android:id="@+id/reset_zoom_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:src="@drawable/ic_zoom_out_map"
+        android:background="@drawable/gallery_video_action_surface"
+        android:padding="12dp"
+        android:layout_margin="4dp"
+        android:layout_gravity="top|end"
+        android:visibility="gone"
+        android:contentDescription="@string/desc_reset_zoom"
+        android:tint="#010102" app:tint="#010102" />
+
+    <!-- Overlay indicator for quick 2x playback (appears while long-press is active) -->
+    <TextView
+        android:id="@+id/quick_speed_overlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="72dp"
+        android:background="@drawable/quick_speed_bg"
+        android:textColor="@android:color/white"
+        android:textStyle="bold"
+        android:textSize="16sp"
+        android:paddingLeft="12dp"
+        android:paddingRight="12dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:visibility="gone"
+        android:importantForAccessibility="no"
+        android:focusable="false"
+        android:focusableInTouchMode="false" />
+
+</com.fadcam.ui.GalleryInlineLayout>

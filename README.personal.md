@@ -1,5 +1,7 @@
 # Personal FadCam fork
 
+For the Samsung-style camera/gallery and in-app USB branch, start with the [current review guide](docs/review/FADCAM_REVIEW.md).
+
 The personal package is `com.pyeonje.fadcam.beta` for the default debug build. The Java namespace stays `com.fadcam`.
 
 Launcher entries:

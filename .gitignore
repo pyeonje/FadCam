@@ -50,3 +50,5 @@ TASKS.md
 feedback.md
 tasks/*
 .commandcode/settings.json
+# Get this pinned build input from Maven Central; see docs/review/FADCAM_REVIEW.md.
+/app/libs/droiduvc-0.2.1.aar

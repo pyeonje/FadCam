@@ -7,4 +7,7 @@
     <item name="tag_page_index" type="id"/>
     <item name="tag_page_active" type="id"/>
     <item name="press_scale_attached" type="id"/>
+    <item type="id" name="personal_exposure_slider" />
+    <item type="id" name="personal_ae_lock" />
+    <item type="id" name="personal_af_picker" />
 </resources> 

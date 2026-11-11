@@ -1,0 +1,15 @@
+<resources>
+    <string name="gallery_pictures">Pictures</string>
+    <string name="gallery_albums">Albums</string>
+    <string name="gallery_menu">Menu</string>
+    <string name="gallery_search">Search</string>
+    <string name="gallery_share">Share</string>
+    <string name="gallery_delete">Delete</string>
+    <string name="gallery_more">More</string>
+    <string name="gallery_select">Select items</string>
+    <string name="gallery_filters">Filter</string>
+    <string name="gallery_today">Today</string>
+    <string name="gallery_yesterday">Yesterday</string>
+    <string name="gallery_other">Other</string>
+    <string name="gallery_file_actions">File options</string>
+</resources>

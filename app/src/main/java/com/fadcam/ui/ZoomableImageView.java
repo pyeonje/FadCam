@@ -30,8 +30,13 @@ public class ZoomableImageView extends AppCompatImageView {
     private final ScaleGestureDetector scaleDetector;
     private final GestureDetector gestureDetector;
     private boolean dragging = false;
+    @Nullable private java.util.function.IntConsumer mediaSwipeListener;
+    private float swipeDownX, swipeDownY;
+    private boolean mediaSwipeEligible;
     private float currentScale = 1f;
     private float baseScale = 1f;
+    private boolean matrixReady;
+    @Nullable private float[] pendingViewport;
     @Nullable
     private OnSingleTapListener singleTapListener;
 
@@ -55,16 +60,24 @@ public class ZoomableImageView extends AppCompatImageView {
         this.singleTapListener = listener;
     }
 
+    /** Gallery paging applies only at the fitted image size; zoomed drags keep panning. */
+    void setOnMediaSwipeListener(@Nullable java.util.function.IntConsumer listener) {
+        mediaSwipeListener = listener;
+    }
+
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        float[] viewport = matrixReady && oldw > 0 && oldh > 0
+                ? captureViewport(oldw, oldh) : pendingViewport;
         super.onSizeChanged(w, h, oldw, oldh);
-        fitToCenter();
+        fitViewport(viewport);
     }
 
     @Override
     public void setImageDrawable(@Nullable android.graphics.drawable.Drawable drawable) {
         super.setImageDrawable(drawable);
-        post(this::fitToCenter);
+        matrixReady = false;
+        post(() -> { if (!matrixReady) fitViewport(pendingViewport); });
     }
 
     @Override
@@ -72,6 +85,11 @@ public class ZoomableImageView extends AppCompatImageView {
         if (getDrawable() == null) {
             return super.onTouchEvent(event);
         }
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            swipeDownX = event.getX(); swipeDownY = event.getY();
+            mediaSwipeEligible = currentScale <= baseScale * 1.01f;
+        }
+        if (event.getPointerCount() > 1) mediaSwipeEligible = false;
         gestureDetector.onTouchEvent(event);
         scaleDetector.onTouchEvent(event);
 
@@ -91,7 +109,16 @@ public class ZoomableImageView extends AppCompatImageView {
                 }
                 break;
             case MotionEvent.ACTION_UP:
+                float dx = event.getX() - swipeDownX, dy = event.getY() - swipeDownY;
+                float threshold = Math.max(android.view.ViewConfiguration.get(getContext()).getScaledTouchSlop() * 2f,
+                        48f * getResources().getDisplayMetrics().density);
+                if (mediaSwipeEligible && mediaSwipeListener != null && Math.abs(dx) >= threshold
+                        && Math.abs(dx) > Math.abs(dy) * 1.25f) mediaSwipeListener.accept(dx > 0 ? 1 : -1);
+                mediaSwipeEligible = false;
+                dragging = false;
+                break;
             case MotionEvent.ACTION_CANCEL:
+                mediaSwipeEligible = false;
                 dragging = false;
                 break;
             default:
@@ -101,6 +128,31 @@ public class ZoomableImageView extends AppCompatImageView {
     }
 
     private void fitToCenter() {
+        fitViewport(null);
+    }
+
+    /** Relative zoom and normalized source-image center, independent of screen dimensions. */
+    @Nullable
+    float[] captureViewport() {
+        return matrixReady ? captureViewport(getWidth(), getHeight()) : pendingViewport;
+    }
+
+    private float[] captureViewport(int width, int height) {
+        matrix.getValues(values);
+        float scale = values[Matrix.MSCALE_X];
+        return new float[] {currentScale / baseScale,
+                (width * .5f - values[Matrix.MTRANS_X]) / (scale * getDrawable().getIntrinsicWidth()),
+                (height * .5f - values[Matrix.MTRANS_Y]) / (scale * getDrawable().getIntrinsicHeight())};
+    }
+
+    void restoreViewport(@Nullable float[] viewport) {
+        if (viewport == null || viewport.length != 3) return;
+        for (float value : viewport) if (!Float.isFinite(value)) return;
+        pendingViewport = viewport.clone();
+        fitViewport(pendingViewport);
+    }
+
+    private void fitViewport(@Nullable float[] viewport) {
         if (getDrawable() == null || getWidth() <= 0 || getHeight() <= 0) {
             return;
         }
@@ -113,12 +165,18 @@ public class ZoomableImageView extends AppCompatImageView {
         matrix.reset();
         float scale = Math.min(getWidth() / drawableW, getHeight() / drawableH);
         baseScale = scale;
-        currentScale = scale;
-        matrix.postScale(scale, scale);
-        float redundantX = (getWidth() - drawableW * scale) * 0.5f;
-        float redundantY = (getHeight() - drawableH * scale) * 0.5f;
+        float zoom = viewport == null ? 1f : Math.max(MIN_SCALE, Math.min(MAX_SCALE, viewport[0]));
+        currentScale = scale * zoom;
+        matrix.postScale(currentScale, currentScale);
+        float centerX = viewport == null ? .5f : Math.max(0f, Math.min(1f, viewport[1]));
+        float centerY = viewport == null ? .5f : Math.max(0f, Math.min(1f, viewport[2]));
+        float redundantX = getWidth() * .5f - drawableW * currentScale * centerX;
+        float redundantY = getHeight() * .5f - drawableH * currentScale * centerY;
         matrix.postTranslate(redundantX, redundantY);
+        clampTranslation();
         setImageMatrix(matrix);
+        matrixReady = true;
+        pendingViewport = null;
     }
 
     private void resetZoom() {
@@ -141,8 +199,10 @@ public class ZoomableImageView extends AppCompatImageView {
         float minY = Math.min(0, getHeight() - scaledH);
         float maxY = Math.max(0, getHeight() - scaledH);
 
-        float clampedX = Math.min(maxX, Math.max(minX, transX));
-        float clampedY = Math.min(maxY, Math.max(minY, transY));
+        float clampedX = scaledW <= getWidth() ? (getWidth() - scaledW) * .5f
+                : Math.min(maxX, Math.max(minX, transX));
+        float clampedY = scaledH <= getHeight() ? (getHeight() - scaledH) * .5f
+                : Math.min(maxY, Math.max(minY, transY));
         matrix.postTranslate(clampedX - transX, clampedY - transY);
     }
 

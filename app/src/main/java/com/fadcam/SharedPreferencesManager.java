@@ -568,8 +568,7 @@ public class SharedPreferencesManager {
     /**
      * Gets the saved zoom ratio preference for a specific camera type.
      * If no specific preference is saved, it returns the default zoom ratio.
-     * For wide-angle cameras, uses a lower default zoom ratio to properly utilize
-     * the wide field of view.
+     * This is local sensor magnification, independent of the selected lens base.
      *
      * @param cameraType FRONT, BACK, or DUAL_PIP camera. DUAL_PIP inherits BACK camera settings.
      * @return The saved zoom ratio (float).
@@ -596,26 +595,11 @@ public class SharedPreferencesManager {
     /**
      * Gets the appropriate default zoom ratio based on camera type and selected
      * lens.
-     * Wide-angle cameras get a lower default zoom ratio to properly utilize their
-     * wide field of view.
+     * Every physical lens starts at its full field of view (local 1x).
      */
     private float getDefaultZoomRatioForCamera(CameraType cameraType) {
-        if (cameraType == CameraType.BACK) {
-            // For back camera, check if a wide-angle lens is selected
-            String selectedCameraId = getSelectedBackCameraId();
-            if (
-                selectedCameraId != null &&
-                !selectedCameraId.equals(Constants.DEFAULT_BACK_CAMERA_ID)
-            ) {
-                // Check camera characteristics to determine if it's wide-angle
-                if (isWideAngleCamera(selectedCameraId)) {
-                    return 0.5f; // Lower zoom for wide-angle cameras to show full field of view
-                }
-                // For telephoto or other cameras, use normal zoom
-                return Constants.DEFAULT_ZOOM_RATIO;
-            }
-        }
-        // Default zoom ratio for main cameras (front camera and main back camera)
+        // Local sensor magnification is 1x on every physical lens. The UI shows
+        // its field-of-view base (.6x/1x/3x/5x) separately.
         return Constants.DEFAULT_ZOOM_RATIO;
     }
 
@@ -623,15 +607,6 @@ public class SharedPreferencesManager {
         CameraType resolvedCameraType = (cameraType != null && cameraType.isDual())
             ? CameraType.BACK
             : cameraType;
-        String selectedCameraId = resolvedCameraType == CameraType.BACK
-            ? getSelectedBackCameraId()
-            : null;
-        boolean preferWideAngleMin =
-            resolvedCameraType == CameraType.BACK &&
-            selectedCameraId != null &&
-            !selectedCameraId.equals(Constants.DEFAULT_BACK_CAMERA_ID) &&
-            isWideAngleCamera(selectedCameraId);
-
         try {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                 android.hardware.camera2.CameraManager manager =
@@ -647,19 +622,12 @@ public class SharedPreferencesManager {
                     );
                     if (range != null && range.getLower() != null) {
                         float minZoomRatio = range.getLower();
-                        if (preferWideAngleMin && minZoomRatio >= 1.0f) {
-                            return 0.5f;
-                        }
                         return minZoomRatio;
                     }
                 }
             }
         } catch (Exception e) {
             FLog.w("SharedPrefs", "Error reading zoom min", e);
-        }
-
-        if (preferWideAngleMin) {
-            return 0.5f;
         }
 
         return Constants.DEFAULT_ZOOM_RATIO;
@@ -699,28 +667,12 @@ public class SharedPreferencesManager {
         CameraType cameraType,
         android.hardware.camera2.CameraManager manager
     ) {
-        if (cameraType == CameraType.BACK) {
-            return getSelectedBackCameraId();
-        }
-
         if (manager == null) {
             return null;
         }
 
         try {
-            for (String cameraId : manager.getCameraIdList()) {
-                android.hardware.camera2.CameraCharacteristics characteristics =
-                    manager.getCameraCharacteristics(cameraId);
-                Integer lensFacing = characteristics.get(
-                    android.hardware.camera2.CameraCharacteristics.LENS_FACING
-                );
-                if (
-                    lensFacing != null &&
-                    lensFacing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
-                ) {
-                    return cameraId;
-                }
-            }
+            return resolveSelectedCameraId(manager,cameraType);
         } catch (Exception e) {
             FLog.w("SharedPrefs", "Error resolving zoom camera ID", e);
         }
@@ -728,39 +680,18 @@ public class SharedPreferencesManager {
         return null;
     }
 
-    /**
-     * Checks if the given camera ID corresponds to a wide-angle or ultra-wide
-     * camera
-     * by examining its focal length characteristics.
-     */
-    private boolean isWideAngleCamera(String cameraId) {
-        try {
-            android.hardware.camera2.CameraManager manager =
-                (android.hardware.camera2.CameraManager) context.getSystemService(
-                    Context.CAMERA_SERVICE
-                );
-            if (manager != null) {
-                android.hardware.camera2.CameraCharacteristics characteristics =
-                    manager.getCameraCharacteristics(cameraId);
-                float[] focalLengths = characteristics.get(
-                    android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
-                );
-                if (focalLengths != null && focalLengths.length > 0) {
-                    float focal = focalLengths[0];
-                    // Wide-angle cameras typically have focal lengths <= 8mm
-                    // Ultra-wide cameras typically have focal lengths <= 4mm
-                    return focal <= 8f;
-                }
-            }
-        } catch (Exception e) {
-            FLog.w(
-                "SharedPrefs",
-                "Error checking camera characteristics for ID: " + cameraId,
-                e
-            );
-        }
-        return false;
+    /** Resolve once against Camera2 advertisements before UI, preview or recording uses an ID. */
+    public String resolveSelectedCameraId(android.hardware.camera2.CameraManager manager, CameraType cameraType)
+            throws android.hardware.camera2.CameraAccessException {
+        boolean front=cameraType==CameraType.FRONT;
+        String preferred=front?null:getSelectedBackCameraId();
+        String selected=com.fadcam.utils.CameraLensCatalog.select(manager,preferred,front
+                ?android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+                :android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK);
+        if(!front && selected!=null && !selected.equals(preferred))setSelectedBackCameraId(selected);
+        return selected;
     }
+
 
     /**
      * Saves the zoom ratio preference for a specific camera type.

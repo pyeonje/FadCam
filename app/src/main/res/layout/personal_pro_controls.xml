@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<HorizontalScrollView xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+ android:layout_width="wrap_content" android:layout_height="30dp" android:fillViewport="false" android:scrollbars="none">
+ <LinearLayout android:id="@+id/personal_pro_items" android:layout_width="wrap_content" android:layout_height="match_parent"
+  android:orientation="horizontal" android:gravity="center" android:paddingStart="12dp" android:paddingEnd="12dp" android:background="@drawable/personal_control_pill">
+  <com.google.android.material.button.MaterialButton android:id="@+id/personal_pro_reset" style="@style/PersonalProButton" android:layout_width="32dp" android:contentDescription="@string/personal_pro_reset" app:icon="@drawable/personal_camera_reset" app:iconGravity="textStart" app:iconPadding="0dp" app:iconSize="12dp" app:iconTint="#FFFFFF" />
+  <com.google.android.material.button.MaterialButton android:id="@+id/personal_pro_iso" style="@style/PersonalProButton" android:text="ISO A" />
+  <com.google.android.material.button.MaterialButton android:id="@+id/personal_pro_speed" style="@style/PersonalProButton" android:text="S A" />
+  <com.google.android.material.button.MaterialButton android:id="@+id/personal_pro_ev" style="@style/PersonalProButton" android:text="+0.0" />
+  <com.google.android.material.button.MaterialButton android:id="@+id/personal_pro_focus" style="@style/PersonalProButton" android:text="AF" />
+  <com.google.android.material.button.MaterialButton android:id="@+id/personal_pro_wb" style="@style/PersonalProButton" android:text="WB A" />
+  <com.google.android.material.button.MaterialButton android:id="@+id/personal_camera_adjust" style="@style/PersonalProButton" android:text="AF/AE" />
+ </LinearLayout>
+</HorizontalScrollView>

@@ -1,0 +1,13 @@
+<resources>
+<string name="viewer_unmute">소리 켜기</string>
+<string name="viewer_mute">소리 끄기</string>
+<string name="viewer_seek">영상 재생 위치</string>
+<string name="viewer_gallery">갤러리</string>
+<string name="viewer_details">상세정보</string>
+<string name="viewer_playback_settings">재생 설정</string>
+<string name="viewer_add_favorite">즐겨찾기에 추가</string>
+<string name="viewer_remove_favorite">즐겨찾기에서 삭제</string>
+<string name="viewer_edit">편집</string>
+    <string name="viewer_system_player">삼성 플레이어로 재생</string>
+    <string name="viewer_external_unavailable">이 영상을 열 수 있는 외부 편집기 또는 플레이어가 없습니다.</string>
+</resources>

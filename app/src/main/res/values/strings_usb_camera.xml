@@ -1,0 +1,16 @@
+<resources>
+    <string name="usb_camera_title">USB endoscope</string>
+    <string name="usb_camera_connect">Connect a USB camera with OTG</string>
+    <string name="usb_camera_choose">Choose USB camera</string>
+    <string name="usb_camera_allow">Allow USB camera</string>
+    <string name="usb_camera_opening">Connecting…</string>
+    <string name="usb_camera_denied">USB permission was not granted</string>
+    <string name="usb_camera_failed">USB camera unavailable. Reconnect or choose another supported mode.</string>
+    <string name="usb_camera_no_focus">This camera does not expose adjustable focus</string>
+    <string name="usb_camera_control_failed">Camera rejected the focus adjustment</string>
+    <string name="usb_camera_zoom">Digital zoom ×%1$.1f</string>
+    <string name="usb_camera_photo">Save photo</string>
+    <string name="usb_camera_saved">Photo saved in FadCam gallery</string>
+    <string name="usb_camera_photo_failed">Could not save photo</string>
+    <string name="usb_camera_modes">Resolution / frame rate</string>
+</resources>

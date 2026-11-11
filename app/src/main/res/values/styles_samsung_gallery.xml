@@ -1,0 +1,27 @@
+<resources>
+    <!-- Gallery APK uses the device's sec family. AOSP resolves unknown aliases to
+         its system sans; no proprietary font is redistributed or settings changed. -->
+    <style name="ThemeOverlay.PersonalSamsungTypography" parent="">
+        <item name="android:fontFamily">sec</item>
+        <item name="fontFamily">sec</item>
+    </style>
+    <style name="ThemeOverlay.PersonalSamsungGallery" parent="ThemeOverlay.PersonalSamsungTypography">
+        <item name="android:colorBackground">#FCFCFF</item>
+        <item name="android:textColorPrimary">#010102</item>
+        <item name="android:textColorSecondary">#6B6B72</item>
+        <item name="colorSurface">#FCFCFF</item>
+        <item name="colorOnSurface">#010102</item>
+        <item name="colorSurfaceVariant">#EEF0F5</item>
+        <item name="colorOnSurfaceVariant">#6B6B72</item>
+        <item name="colorControlNormal">#010102</item>
+        <item name="colorAccent">#010102</item>
+        <item name="colorHeading">#010102</item>
+        <item name="colorButton">#010102</item>
+        <item name="colorToggle">#010102</item>
+        <item name="homeRailCardSurface">#FCFCFF</item>
+        <item name="homeRailCardBorder">#E2E2E7</item>
+        <item name="homeRailTextPrimary">#010102</item>
+        <item name="homeRailTextSecondary">#6B6B72</item>
+        <item name="popupMenuStyle">@style/Widget.PersonalSamsungVideoPopup</item>
+    </style>
+</resources>

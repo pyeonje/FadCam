@@ -1,0 +1,5 @@
+<resources>
+    <string name="personal_focus_center">중앙 AF</string>
+    <string name="personal_focus_multi">다분할 AF</string>
+    <string name="personal_focus_area">자동 초점 영역</string>
+</resources>

@@ -1,0 +1,15 @@
+<resources>
+    <string name="gallery_pictures">사진</string>
+    <string name="gallery_albums">앨범</string>
+    <string name="gallery_menu">메뉴</string>
+    <string name="gallery_search">검색</string>
+    <string name="gallery_share">공유</string>
+    <string name="gallery_delete">삭제</string>
+    <string name="gallery_more">더보기</string>
+    <string name="gallery_select">항목 선택</string>
+    <string name="gallery_filters">필터</string>
+    <string name="gallery_today">오늘</string>
+    <string name="gallery_yesterday">어제</string>
+    <string name="gallery_other">기타</string>
+    <string name="gallery_file_actions">파일 옵션</string>
+</resources>

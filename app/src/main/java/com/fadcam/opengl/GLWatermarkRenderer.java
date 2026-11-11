@@ -206,6 +206,7 @@ public class GLWatermarkRenderer {
     private final float[] recordingMvpMatrix = new float[16];
     private final float[] previewMvpMatrix = new float[16];
     private final float[] texMatrix = new float[16];
+    private int previewContentWidth, previewContentHeight;
 
     private final Object renderLock = new Object();
     private final Object previewRenderLock = new Object();
@@ -844,8 +845,8 @@ public class GLWatermarkRenderer {
 
             if (pvW[0] > 0 && pvH[0] > 0) {
                 // Content dimensions = encoder output (already rotation-corrected)
-                int contentW = encoderWidth > 0 ? encoderWidth : videoWidth;
-                int contentH = encoderHeight > 0 ? encoderHeight : videoHeight;
+                int contentW = previewContentWidth > 0 ? previewContentWidth : encoderWidth > 0 ? encoderWidth : videoWidth;
+                int contentH = previewContentHeight > 0 ? previewContentHeight : encoderHeight > 0 ? encoderHeight : videoHeight;
 
                 float contentAR = (float) contentW / contentH;
                 float surfaceAR = (float) pvW[0] / pvH[0];
@@ -2492,6 +2493,18 @@ public class GLWatermarkRenderer {
         updateMatrices();
     }
 
+    /** Called only by the idle pipeline on its GL thread; encoder dimensions stay fixed. */
+    public void setPreviewOnlyDisplay(int rotation, int width, int height) {
+        boolean landscape = rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270;
+        previewContentWidth = landscape ? Math.max(videoWidth, videoHeight) : Math.min(videoWidth, videoHeight);
+        previewContentHeight = landscape ? Math.min(videoWidth, videoHeight) : Math.max(videoWidth, videoHeight);
+        userOrientationSetting = landscape ? "landscape" : "portrait";
+        deviceOrientation = rotation;
+        mSurfaceWidth = width;
+        mSurfaceHeight = height;
+        updateMatrices();
+    }
+
     public void setSurfaceDimensions(int width, int height) {
         if (mSurfaceWidth != width || mSurfaceHeight != height) {
             mSurfaceWidth = width;
@@ -2700,8 +2713,8 @@ public class GLWatermarkRenderer {
         }
 
         // Use actual encoder dimensions for aspect ratio
-        int orientedVideoWidth = encoderWidth > 0 ? encoderWidth : videoWidth;
-        int orientedVideoHeight = encoderHeight > 0 ? encoderHeight : videoHeight;
+        int orientedVideoWidth = previewContentWidth > 0 ? previewContentWidth : encoderWidth > 0 ? encoderWidth : videoWidth;
+        int orientedVideoHeight = previewContentHeight > 0 ? previewContentHeight : encoderHeight > 0 ? encoderHeight : videoHeight;
 
         float videoAspectRatio = (float) orientedVideoWidth / orientedVideoHeight;
         float previewAspectRatio = (float) mSurfaceWidth / mSurfaceHeight;

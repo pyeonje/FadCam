@@ -4,6 +4,7 @@ import android.app.Service;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Environment;
+import android.os.Build;
 import android.os.IBinder;
 
 import android.provider.DocumentsContract;
@@ -329,7 +330,8 @@ public class RecordsDeletionService extends Service {
                                 sessionStore.write(latest);
 
                                 // Remove from index if deletion was successful
-                                if (snapshot.operationKind == RecordsDeletionSessionSnapshot.OperationKind.DELETE) {
+                                if (snapshot.operationKind == RecordsDeletionSessionSnapshot.OperationKind.DELETE
+                                        || snapshot.operationKind == RecordsDeletionSessionSnapshot.OperationKind.SAVE_MOVE_TO_GALLERY) {
                                     try {
                                         VideoIndexRepository.getInstance(this).removeFromIndex(result.item.uriString);
                                     } catch (Exception e) {
@@ -459,42 +461,13 @@ public class RecordsDeletionService extends Service {
         }
 
         try {
-            File destination = resolveUniqueGalleryDestination(item.displayName);
-            if (destination == null) {
-                return false;
-            }
-
-            try (InputStream in = getContentResolver().openInputStream(uri);
-                 OutputStream out = new FileOutputStream(destination)) {
-                if (in == null) {
-                    return false;
-                }
-
-                byte[] buffer = new byte[16 * 1024];
-                int read;
-                long totalCopied = 0L;
-                long lastGcBytes = 0L;
-                // Trigger GC once per GiB to prevent heap exhaustion during large copies
-                long gcInterval = 1024L * 1024L * 1024L;
-
-                while ((read = in.read(buffer)) != -1) {
-                    if (cancelRequested.get()) {
-                        throw new CancellationSignalException();
-                    }
-                    out.write(buffer, 0, read);
-                    totalCopied += read;
-                    if (totalCopied - lastGcBytes >= gcInterval) {
-                        lastGcBytes = totalCopied;
-                        // Hint GC to free transient memory during long I/O,
-                        // preventing heap exhaustion from background display events
-                        System.gc();
-                    }
-                }
-                out.flush();
-            }
-
-            Utils.scanFileWithMediaStore(this, destination.getAbsolutePath());
-
+            GalleryMediaPublisher.checkCancelled(cancelRequested::get);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                GalleryMediaPublisher.publish(getContentResolver(), item, cancelRequested::get);
+            } else if (!copyToLegacyGallery(item, uri)) return false;
+            // A successful public copy/closed stream is required BEFORE deleting
+            // the original. A late cancellation retains the original and copy.
+            GalleryMediaPublisher.checkCancelled(cancelRequested::get);
             if (moveToGallery) {
                 // For MOVE operations, deletion is required for success
                 return deleteOriginalFile(uri);
@@ -504,6 +477,27 @@ public class RecordsDeletionService extends Service {
         } catch (Exception e) {
             FLog.w(TAG, "processSaveItemAsync failed for " + item.uriString, e);
             return false;
+        }
+    }
+
+    private boolean copyToLegacyGallery(@NonNull RecordsDeletionRequestItem item,@NonNull Uri source) throws Exception {
+        File destination=resolveUniqueGalleryDestination(GalleryMediaPublisher.displayName(item.displayName));
+        if(destination==null||!destination.createNewFile())return false;
+        boolean completed=false;
+        try {
+            long copied;
+            try(InputStream in=getContentResolver().openInputStream(source);
+                    OutputStream out=new FileOutputStream(destination)) {
+                if(in==null)throw new java.io.IOException("Source stream unavailable");
+                copied=GalleryMediaPublisher.copy(in,out,cancelRequested::get);
+            }
+            if(copied<=0||(item.sizeBytes>0&&copied!=item.sizeBytes)||destination.length()!=copied)
+                throw new java.io.IOException("Gallery byte count mismatch");
+            GalleryMediaPublisher.checkCancelled(cancelRequested::get);
+            Utils.scanFileWithMediaStore(this,destination.getAbsolutePath());
+            completed=true;return true;
+        } finally {
+            if(!completed&&!destination.delete())FLog.w(TAG,"Unable to clean owned partial Gallery copy");
         }
     }
 

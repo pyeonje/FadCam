@@ -1,3 +1,4 @@
+import java.security.MessageDigest
 import java.util.Properties
 
 plugins {
@@ -268,7 +269,15 @@ android {
     }
 }
 
+// Published UVC binary is pinned: build input must match the reviewed engine, including its native code.
+val uvcEngine = file("libs/droiduvc-0.2.1.aar")
+check(uvcEngine.exists()) { "Missing libs/droiduvc-0.2.1.aar; see assets/licenses/droiduvc/NOTICE.txt" }
+val uvcDigest = MessageDigest.getInstance("SHA-256").digest(uvcEngine.readBytes())
+    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+check(uvcDigest == "a44a5dcb2be88318ebf4032e90e484192d3976eb19e299d2b516ae7d70fb1da0") { "USB engine identity mismatch" }
+
 dependencies {
+    implementation(files(uvcEngine))
     implementation(libs.activity)
     implementation(libs.appintro.v631)
     implementation(libs.appcompat)

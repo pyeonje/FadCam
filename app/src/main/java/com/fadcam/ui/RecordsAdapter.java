@@ -130,7 +130,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
     // ── Entries list (interleaved headers + items) ──
     private List<Object> entries = new ArrayList<>();
 
-    private static final SimpleDateFormat MONTH_FORMAT = new SimpleDateFormat("MMMM yyyy", Locale.getDefault());
+    private static final SimpleDateFormat MONTH_FORMAT = new SimpleDateFormat("EEE, d MMM yyyy", Locale.getDefault());
 
     // Keep the cache for thumbnails but optimize it
     // Keyed by URI string (not position) to survive list reorders/sorts without serving stale data.
@@ -303,7 +303,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
     @Override
     public RecyclerView.ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
         if (viewType == VIEW_TYPE_HEADER) {
-            View view = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_forensics_month_header, parent, false);
+            View view = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_gallery_date_header, parent, false);
             return new MonthHeaderViewHolder(view);
         }
         View view = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_record, parent, false);
@@ -415,10 +415,11 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
             if (holder.textViewFileTime != null) holder.textViewFileTime.setTextColor(Color.BLACK);
             if (holder.textViewTimeAgo != null) holder.textViewTimeAgo.setTextColor(Color.BLACK);
         } else {
-            int cardSurface = resolveThemeColor(context, R.attr.homeRailCardSurface);
-            int cardBorder = resolveThemeColor(context, R.attr.homeRailCardBorder);
-            int primaryText = resolveThemeColor(context, R.attr.homeRailTextPrimary);
-            int secondaryText = resolveThemeColor(context, R.attr.homeRailTextSecondary);
+            Context galleryContext = holder.itemView.getContext();
+            int cardSurface = resolveThemeColor(galleryContext, R.attr.homeRailCardSurface);
+            int cardBorder = resolveThemeColor(galleryContext, R.attr.homeRailCardBorder);
+            int primaryText = resolveThemeColor(galleryContext, R.attr.homeRailTextPrimary);
+            int secondaryText = resolveThemeColor(galleryContext, R.attr.homeRailTextSecondary);
 
             if (holder.itemView instanceof CardView && context != null) {
                 CardView cardView = (CardView) holder.itemView;
@@ -608,11 +609,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                     }
                     if (cachedSaved != null && cachedDur != null) {
                         applyProgressToView(progressBg, progressFill, cachedSaved, cachedDur);
-                    } else {
-                        if (!canRunHeavyMetadataWork()) {
-                            progressFill.setVisibility(View.GONE);
-                            return;
-                        }
+                    } else if (canRunHeavyMetadataWork()) {
                         final Long finalCachedDur = cachedDur;
                         // Submit one background task to compute missing values
                         executorService.execute(() -> {
@@ -637,13 +634,21 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                                 }
                                 final long fSaved = savedMs;
                                 final long fDur = durationMs;
-                                mainHandler.post(() -> applyProgressToView(progressBg, progressFill, fSaved, fDur));
+                                mainHandler.post(() -> {
+                                    if (key.equals(holder.currentUri)) {
+                                        applyProgressToView(progressBg, progressFill, fSaved, fDur);
+                                    }
+                                });
                             } catch (Exception e) {
                                 FLog.w(TAG, "Error computing thumbnail progress", e);
-                                mainHandler.post(() -> progressFill.setVisibility(View.GONE));
+                                mainHandler.post(() -> {
+                                    if (key.equals(holder.currentUri)) progressFill.setVisibility(View.GONE);
+                                });
                             }
                         });
                     }
+                    // A deferred/cold metadata cache must not abort the rest of
+                    // this bind: sizing, selection and click listeners are UI work.
                 }
             }
         } catch (Exception ignored) {
@@ -957,11 +962,12 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                 ((CardView) holder.itemView).setCardBackgroundColor(Color.WHITE);
                 if (holder.textViewRecord != null) holder.textViewRecord.setTextColor(Color.BLACK);
             } else {
-                ((CardView) holder.itemView).setCardBackgroundColor(ContextCompat.getColor(context, R.color.gray));
+                ((CardView) holder.itemView).setCardBackgroundColor(resolveThemeColor(holder.itemView.getContext(), R.attr.homeRailCardSurface));
                 if (holder.textViewRecord != null) holder.textViewRecord.setTextColor(holder.defaultTextColor);
             }
         }
 
+        holder.iconCheckContainer.setVisibility(View.VISIBLE);
         if (isCurrentlySelected) {
             holder.iconCheckContainer.setVisibility(View.VISIBLE);
             if (animateCheck) {
@@ -974,12 +980,12 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         } else {
             if (animateCheck) {
                 animateCheckIcon(holder.checkIcon, false);
-                holder.checkIcon.postDelayed(() -> holder.iconCheckContainer.setVisibility(View.GONE), 170);
+                // Keep the empty selection circle visible on every tile in selection mode.
             } else {
                 holder.checkIcon.setAlpha(0f);
                 holder.checkIcon.setScaleX(0f);
                 holder.checkIcon.setScaleY(0f);
-                holder.iconCheckContainer.setVisibility(View.GONE);
+                holder.iconCheckContainer.setVisibility(View.VISIBLE);
             }
         }
     }
@@ -1275,8 +1281,21 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
      * icons.
      * Preserves existing behaviors by mapping item ids to the same handlers.
      */
+    void showFileActions(Uri uri, ViewGroup parent) {
+        for (VideoItem item : records) {
+            if (item != null && item.uri.equals(uri)) {
+                RecordViewHolder holder = new RecordViewHolder(LayoutInflater.from(context)
+                        .inflate(R.layout.item_record, parent, false));
+                showVideoActionsSheet(holder, item);
+                return;
+            }
+        }
+    }
+
     private void showVideoActionsSheet(RecordViewHolder holder, VideoItem videoItem) {
-        Context ctx = holder.itemView.getContext();
+        // Tile XML has a scoped light ContextThemeWrapper. The owning context
+        // supplies the real FragmentActivity; a wrapper is not a missing host.
+        Context ctx = context;
         boolean isImage = videoItem != null && videoItem.mediaType == VideoItem.MediaType.IMAGE;
         if (!(ctx instanceof FragmentActivity)) {
             // Fallback to popup if we don't have a FragmentActivity context
@@ -2209,40 +2228,14 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
      * exporting.
      */
     private void openWithExternalPlayer(VideoItem videoItem) {
-        if (context == null || videoItem == null || videoItem.uri == null)
-            return;
+        if (context == null || videoItem == null || videoItem.uri == null) return;
         try {
-            Uri shareUri = getShareableUri(videoItem.uri);
-            if (shareUri == null) {
-                Toast.makeText(context, R.string.toast_video_not_found, Toast.LENGTH_SHORT).show();
-                return;
-            }
-
-            Intent intent = new Intent(Intent.ACTION_VIEW);
-            intent.setDataAndType(shareUri, "video/*");
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-
-            Intent chooser = Intent.createChooser(intent, context.getString(R.string.chooser_open_with));
-            context.startActivity(chooser);
-        } catch (Exception e) {
-            FLog.e(TAG, "Error opening external player for: " + videoItem.uri, e);
-            try {
-                // final fallback: generic SEND chooser
-                Uri shareUri = getShareableUri(videoItem.uri);
-                Intent chooserIntent = Intent.createChooser(
-                        new Intent(Intent.ACTION_SEND)
-                                .setType("video/*")
-                                .putExtra(Intent.EXTRA_STREAM, shareUri)
-                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                        context.getString(R.string.chooser_open_with));
-                context.startActivity(chooserIntent);
-            } catch (Exception ex) {
-                FLog.e(TAG, "Fallback share failed", ex);
-                Toast.makeText(context, context.getString(R.string.records_cannot_open_video, ex.getMessage()), Toast.LENGTH_LONG).show();
-            }
+            GalleryExternalApps.launch(context, GalleryExternalApps.intent(context, videoItem.uri, false, true),
+                    R.string.viewer_system_player);
+        } catch (RuntimeException failure) {
+            Toast.makeText(context, R.string.viewer_external_unavailable, Toast.LENGTH_SHORT).show();
         }
     }
-
     // --- NEW Helper to get resolution (refactored from info dialog) ---
     private String getVideoResolution(Uri videoUri) {
         if (context == null || videoUri == null)
@@ -2727,6 +2720,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         RecordViewHolder(View itemView) {
             super(itemView);
             imageViewThumbnail = itemView.findViewById(R.id.image_view_thumbnail);
+            thumbnailContainer = itemView.findViewById(R.id.thumbnail_container);
             textViewRecord = itemView.findViewById(R.id.text_view_record);
             textViewFileSize = itemView.findViewById(R.id.text_view_file_size);
             textViewFileTime = itemView.findViewById(R.id.text_view_file_time);
@@ -2864,7 +2858,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
      */
     @SuppressLint("NotifyDataSetChanged")
     public void setGridSpan(int spanCount) {
-        int normalized = Math.max(1, Math.min(5, spanCount));
+        int normalized = Math.max(1, Math.min(8, spanCount));
         if (currentGridSpan == normalized) return;
         currentGridSpan = normalized;
         notifyDataSetChanged();
@@ -2875,6 +2869,12 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
      * At higher column counts, content is progressively reduced to fit.
      */
     private void applyGridSizing(@NonNull RecordViewHolder holder) {
+        if (holder.thumbnailContainer != null) {
+            androidx.constraintlayout.widget.ConstraintLayout.LayoutParams thumbnailParams =
+                    (androidx.constraintlayout.widget.ConstraintLayout.LayoutParams) holder.thumbnailContainer.getLayoutParams();
+            thumbnailParams.dimensionRatio = currentGridSpan >= 2 ? "H,1:1" : "H,16:9";
+            holder.thumbnailContainer.setLayoutParams(thumbnailParams);
+        }
         float titleSp;
         float metaSp;
         boolean showTitleRow;
@@ -2883,7 +2883,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         boolean showContentContainer;
         int titleMaxLines;
 
-        switch (currentGridSpan) {
+        switch (Math.min(5, currentGridSpan)) {
             case 1: // List mode — full content
                 titleSp = 14f;
                 metaSp = 10f;
@@ -2891,7 +2891,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                 showMetaDivider = true;
                 showTimeAgo = true;
                 showContentContainer = true;
-                titleMaxLines = 10;
+                titleMaxLines = 2;
                 break;
             case 3:
                 titleSp = 12f;
@@ -2900,7 +2900,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                 showMetaDivider = true;
                 showTimeAgo = true;
                 showContentContainer = true;
-                titleMaxLines = 10;
+                titleMaxLines = 1;
                 break;
             case 4:
                 titleSp = 10f;
@@ -2931,6 +2931,21 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                 break;
         }
 
+        // Picture grids show media, with file details retained in the explicit list view / More.
+        if (currentGridSpan >= 2) {
+            showContentContainer = false;
+            showTitleRow = false;
+            showMetaDivider = false;
+            showTimeAgo = false;
+        }
+        if (holder.textViewSerialNumber != null) holder.textViewSerialNumber.setVisibility(View.GONE);
+        if (holder.textViewNewBadge != null) holder.textViewNewBadge.setVisibility(View.GONE);
+        View badges = holder.itemView.findViewById(R.id.status_badge_container);
+        if (badges != null) badges.setVisibility(currentGridSpan == 1 ? View.VISIBLE : View.GONE);
+        if (holder.textViewFileTime != null) {
+            holder.textViewFileTime.setTextColor(Color.WHITE);
+            holder.textViewFileTime.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
+        }
         // Content container
         if (holder.recordContentContainer != null) {
             holder.recordContentContainer.setVisibility(showContentContainer ? View.VISIBLE : View.GONE);
@@ -2953,7 +2968,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
             holder.textViewRecord.setMaxLines(titleMaxLines);
         }
         if (holder.textViewFileTime != null) {
-            holder.textViewFileTime.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, metaSp);
+            holder.textViewFileTime.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10f);
         }
         if (holder.textViewFileSize != null) {
             holder.textViewFileSize.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, metaSp);
@@ -3520,7 +3535,12 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         Object entry = entries.get(position);
         if (!(entry instanceof MonthHeaderEntry)) return;
         MonthHeaderEntry header = (MonthHeaderEntry) entry;
-        holder.title.setText(header.monthKey);
+        String today = MONTH_FORMAT.format(new Date());
+        java.util.Calendar yesterday = java.util.Calendar.getInstance();
+        yesterday.add(java.util.Calendar.DAY_OF_YEAR, -1);
+        holder.title.setText(header.monthKey.equals(today) ? context.getString(R.string.gallery_today)
+                : header.monthKey.equals(MONTH_FORMAT.format(yesterday.getTime()))
+                    ? context.getString(R.string.gallery_yesterday) : header.monthKey);
 
         // Match Lab tab style: container is always VISIBLE, alpha controls visibility
         holder.selectContainer.setVisibility(View.VISIBLE);

@@ -38,6 +38,11 @@ import java.util.Locale;
 public class ImageViewerActivity extends AppCompatActivity {
 
     private static final int OVERLAY_ANIM_DURATION = 200;
+    public static android.content.Intent createGalleryIntent(android.content.Context context, Uri uri) {
+        return new android.content.Intent(context, ImageViewerActivity.class).setDataAndType(uri, "image/*")
+                .putExtra(VideoPlayerActivity.EXTRA_GALLERY_PREVIEW, true)
+                .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    }
 
     public static final String EXTRA_SOURCE_VIDEO_URI = "com.fadcam.extra.SOURCE_VIDEO_URI";
     public static final String EXTRA_OPEN_AT_MS = "com.fadcam.extra.OPEN_AT_MS";
@@ -55,6 +60,10 @@ public class ImageViewerActivity extends AppCompatActivity {
     @Nullable
     private View bottomDock;
     private boolean overlayVisible = true;
+    private ZoomableImageView imageView;
+    private GalleryMediaStrip galleryMediaStrip;
+    private static final String STATE_VIEWPORT = "image_viewport";
+    private static final String STATE_OVERLAY = "image_overlay";
 
     @Nullable
     private Uri sourceVideoUri;
@@ -88,13 +97,30 @@ public class ImageViewerActivity extends AppCompatActivity {
 
         ImageView back = findViewById(R.id.imageViewerBack);
         ImageView more = findViewById(R.id.imageViewerMore);
-        ZoomableImageView imageView = findViewById(R.id.imageViewerImage);
+        imageView = findViewById(R.id.imageViewerImage);
         TextView metaView = findViewById(R.id.imageViewerMeta);
         topDock = findViewById(R.id.imageViewerTopDock);
         bottomDock = findViewById(R.id.imageViewerBottomDock);
+        if (savedInstanceState != null) {
+            imageView.restoreViewport(savedInstanceState.getFloatArray(STATE_VIEWPORT));
+            overlayVisible = savedInstanceState.getBoolean(STATE_OVERLAY, true);
+            if (!overlayVisible) {
+                topDock.setVisibility(View.GONE);
+                bottomDock.setVisibility(View.GONE);
+            }
+        }
+        applyViewerLayout();
         applySystemInsets();
         if (back != null) {
-            back.setOnClickListener(v -> finish());
+            back.setOnClickListener(v -> {
+                if (getIntent().getBooleanExtra(VideoPlayerActivity.EXTRA_GALLERY_PREVIEW, false)
+                        && !getIntent().getBooleanExtra("gallery_return_to_grid", false)) {
+                    startActivity(new android.content.Intent(this, com.fadcam.MainActivity.class)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            .putExtra(GalleryViewerActions.EXTRA_OPEN_GALLERY, true));
+                }
+                finish();
+            });
         }
         if (imageView != null) {
             imageView.setOnSingleTapListener(this::toggleOverlay);
@@ -106,6 +132,7 @@ public class ImageViewerActivity extends AppCompatActivity {
             finish();
             return;
         }
+        setupGalleryMediaNavigation(uri);
         sourceVideoUri = parseUri(getIntent().getStringExtra(EXTRA_SOURCE_VIDEO_URI));
         openAtMs = Math.max(0L, getIntent().getLongExtra(EXTRA_OPEN_AT_MS, 0L));
         eventType = getIntent().getStringExtra(EXTRA_EVENT_TYPE);
@@ -117,11 +144,18 @@ public class ImageViewerActivity extends AppCompatActivity {
         itemDisplayName = getIntent().getStringExtra("item_display_name");
 
         if (metaView != null) {
-            metaView.setText(buildInlineMeta());
+            boolean evidence = sourceVideoUri != null || !TextUtils.isEmpty(className) || !TextUtils.isEmpty(eventType);
+            metaView.setVisibility(evidence ? View.VISIBLE : View.GONE);
+            if (evidence) metaView.setText(buildInlineMeta());
         }
         if (more != null) {
-            more.setOnClickListener(v -> showInfoSheet(uri));
+            more.setOnClickListener(v -> GalleryViewerActions.showMore(this, v, uri, itemDisplayName, "image/*",
+                    () -> showInfoSheet(uri), null));
         }
+        GalleryViewerActions.bindFavorite(this, findViewById(R.id.gallery_viewer_favorite), uri);
+        GalleryViewerActions.bindEdit(this, findViewById(R.id.gallery_viewer_edit), uri, false);
+        findViewById(R.id.gallery_viewer_share).setOnClickListener(v -> GalleryViewerActions.share(this, uri, "image/*"));
+        findViewById(R.id.gallery_viewer_delete).setOnClickListener(v -> GalleryViewerActions.confirmDelete(this, uri, itemDisplayName));
 
         Glide.with(this)
                 .load(uri)
@@ -139,6 +173,60 @@ public class ImageViewerActivity extends AppCompatActivity {
                     }
                 })
                 .into(imageView);
+    }
+
+    private void setupGalleryMediaNavigation(Uri uri) {
+        galleryMediaStrip = findViewById(R.id.gallery_media_strip);
+        if (!getIntent().getBooleanExtra(VideoPlayerActivity.EXTRA_GALLERY_PREVIEW, false)) return;
+        galleryMediaStrip.setVisibility(View.VISIBLE);
+        galleryMediaStrip.showCurrent(uri, new GalleryMediaStrip.Listener() {
+            @Override public void onCurrentVideoTap() { }
+            @Override public void onMediaSelected(VideoItem item) { selectGalleryMedia(item); }
+            @Override public void onFrameSeekStarted() { }
+            @Override public void onFrameSeek(long positionMs, boolean finished) { }
+        });
+        imageView.setOnMediaSwipeListener(direction -> galleryMediaStrip.navigateMedia(direction));
+    }
+
+    void selectGalleryMedia(VideoItem item) {
+        if (item == null || item.uri == null || item.uri.equals(getIntent().getData())) return;
+        android.content.Intent intent = RecentMediaLauncher.createIntent(this, item);
+        intent.putExtra("gallery_return_to_grid", getIntent().getBooleanExtra("gallery_return_to_grid", false));
+        startActivity(intent);
+        finish();
+    }
+
+    @Override protected void onDestroy() {
+        if (imageView != null) imageView.setOnMediaSwipeListener(null);
+        if (galleryMediaStrip != null) galleryMediaStrip.close();
+        super.onDestroy();
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // The image view preserves its source-relative zoom/center when its size changes.
+        applyViewerLayout();
+        ViewCompat.requestApplyInsets(findViewById(android.R.id.content));
+    }
+
+    @Override
+    protected void onSaveInstanceState(@NonNull Bundle outState) {
+        if (imageView != null) outState.putFloatArray(STATE_VIEWPORT, imageView.captureViewport());
+        outState.putBoolean(STATE_OVERLAY, overlayVisible);
+        super.onSaveInstanceState(outState);
+    }
+
+    private void applyViewerLayout() {
+        boolean landscape = getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        float density = getResources().getDisplayMetrics().density;
+        if (topDock != null) {
+            int vertical = 0;
+            topDock.setPadding(topDock.getPaddingLeft(), vertical, topDock.getPaddingRight(), vertical);
+        }
+        TextView meta = findViewById(R.id.imageViewerMeta);
+        if (meta != null) meta.setMaxLines(landscape ? 1 : 3);
     }
 
     /**
@@ -296,6 +384,14 @@ public class ImageViewerActivity extends AppCompatActivity {
                     : snapshotUri.getLastPathSegment();
             ScanInfoBottomSheet.newInstance(snapshotUri.toString(), name)
                     .show(getSupportFragmentManager(), "scan_info");
+            return;
+        }
+        if (sourceVideoUri == null && TextUtils.isEmpty(className) && TextUtils.isEmpty(eventType)) {
+            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                    .setTitle(R.string.video_menu_info)
+                    .setMessage(GalleryViewerActions.displayName(this, snapshotUri, itemDisplayName)
+                            + "\n\n" + snapshotUri)
+                    .setPositiveButton(android.R.string.ok, null).show();
             return;
         }
         ForensicsEvidenceInfoBottomSheet.newInstance(

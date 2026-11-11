@@ -150,6 +150,8 @@ public class AnimatedTextView extends AppCompatTextView {
         // Debounce rapid updates — if a new value arrives too quickly just set it.
         long now = System.currentTimeMillis();
         if (now - lastUpdateTime < DEBOUNCE_MS) {
+            // A prior transition must not commit its stale pending text after this update.
+            cancelSlotAnimation();
             setText(newText);
             return;
         }

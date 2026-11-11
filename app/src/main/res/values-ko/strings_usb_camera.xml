@@ -1,0 +1,16 @@
+<resources>
+    <string name="usb_camera_title">USB 내시경</string>
+    <string name="usb_camera_connect">OTG로 USB 카메라를 연결하세요</string>
+    <string name="usb_camera_choose">USB 카메라 선택</string>
+    <string name="usb_camera_allow">USB 카메라 연결 허용</string>
+    <string name="usb_camera_opening">연결 중…</string>
+    <string name="usb_camera_denied">USB 카메라 접근이 허용되지 않았습니다</string>
+    <string name="usb_camera_failed">USB 카메라를 열 수 없습니다. 다시 연결하거나 지원되는 다른 영상 규격을 선택하세요.</string>
+    <string name="usb_camera_no_focus">이 카메라는 조절 가능한 초점을 제공하지 않습니다</string>
+    <string name="usb_camera_control_failed">카메라가 초점 조절 요청을 거부했습니다</string>
+    <string name="usb_camera_zoom">디지털 확대 ×%1$.1f</string>
+    <string name="usb_camera_photo">사진 저장</string>
+    <string name="usb_camera_saved">FadCam 갤러리에 사진을 저장했습니다</string>
+    <string name="usb_camera_photo_failed">사진을 저장하지 못했습니다</string>
+    <string name="usb_camera_modes">해상도 / 프레임 속도</string>
+</resources>

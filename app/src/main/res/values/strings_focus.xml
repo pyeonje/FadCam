@@ -1,0 +1,5 @@
+<resources>
+    <string name="personal_focus_center">Center AF</string>
+    <string name="personal_focus_multi">Multi AF</string>
+    <string name="personal_focus_area">Autofocus area</string>
+</resources>

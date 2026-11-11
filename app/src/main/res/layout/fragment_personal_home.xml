@@ -1,62 +1,151 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/personal_camera_viewport"
+    android:theme="@style/ThemeOverlay.PersonalSamsungTypography"
     android:layout_width="match_parent" android:layout_height="match_parent"
-    android:fillViewport="true" android:background="#101916" android:clipToPadding="false">
-    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:orientation="vertical" android:gravity="center_horizontal"
-        android:paddingStart="24dp" android:paddingEnd="24dp" android:paddingTop="28dp" android:paddingBottom="32dp">
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="@string/personal_home_title" android:textSize="24sp" android:textStyle="bold" android:textColor="#F0F7F3" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="8dp" android:text="@string/personal_home_subtitle"
-            android:textSize="14sp" android:textColor="#9DB5A7" />
-        <FrameLayout android:layout_width="match_parent" android:layout_height="260dp"
-            android:layout_marginTop="24dp">
-            <TextureView android:id="@+id/personal_home_preview"
-                android:layout_width="match_parent" android:layout_height="match_parent"
-                android:visibility="invisible" android:importantForAccessibility="no" />
+    android:background="#000000">
+    <!-- Preview fills the available camera screen; controls overlay it. -->
+    <TextureView android:id="@+id/personal_home_preview"
+        android:layout_width="match_parent" android:layout_height="match_parent"
+        android:importantForAccessibility="no" android:visibility="invisible" />
+    <View android:id="@+id/personal_camera_left_rail" android:layout_width="64dp" android:layout_height="match_parent" android:layout_gravity="start" android:background="#000000" android:visibility="gone" android:importantForAccessibility="no" />
+    <View android:id="@+id/personal_camera_mode_rail" android:layout_width="84dp" android:layout_height="match_parent" android:layout_gravity="end" android:background="#000000" android:visibility="gone" android:importantForAccessibility="no" />
+    <com.fadcam.ui.PersonalCameraGuides android:id="@+id/personal_camera_guides" android:layout_width="match_parent" android:layout_height="match_parent" android:visibility="gone" />
+    <View android:id="@+id/personal_focus_ring"
+        android:layout_width="64dp" android:layout_height="64dp"
+        android:background="@drawable/personal_focus_ring" android:visibility="gone"
+        android:importantForAccessibility="no" android:clickable="false" />
+    <FrameLayout android:id="@+id/personal_top_controls" android:layout_width="match_parent" android:layout_height="72dp"
+        android:layout_gravity="top"
+        android:paddingStart="12dp" android:paddingEnd="12dp">
         <LinearLayout android:id="@+id/personal_home_clock"
-            android:layout_width="236dp" android:layout_height="236dp" android:layout_gravity="center"
-            android:paddingTop="8dp" android:paddingBottom="8dp" android:background="@drawable/personal_timer_background"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal|top" android:layout_marginStart="56dp"
+            android:layout_marginTop="6dp" android:layout_marginEnd="56dp"
             android:gravity="center" android:orientation="vertical">
-            <TextView android:id="@+id/personal_home_timer" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="00:00" android:textSize="46sp" android:fontFamily="sans-serif-light"
-                android:textColor="#F0F7F3" android:importantForAccessibility="no" />
-            <TextView android:id="@+id/personal_home_status" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginTop="10dp" android:text="@string/personal_home_syncing"
-                android:textSize="14sp" android:textColor="#65D7A0" android:accessibilityLiveRegion="polite" />
+            <TextView android:id="@+id/personal_home_timer"
+                android:layout_width="wrap_content" android:layout_height="24dp" android:minWidth="84dp" android:gravity="center"
+                android:fontFamily="sec-num-fixed" app:fontFamily="sec-num-fixed" android:textFontWeight="600" android:importantForAccessibility="no"
+                android:text="00:00" android:textColor="#FFFFFF" android:textSize="14sp" android:includeFontPadding="false"
+                android:visibility="gone" />
+            <TextView android:id="@+id/personal_home_status"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:accessibilityLiveRegion="polite" android:ellipsize="end" android:gravity="center"
+                android:maxLines="1" android:shadowColor="#CC000000" android:shadowRadius="4"
+                android:text="@string/personal_home_syncing" android:textColor="#FFFFFF" android:textSize="13sp" />
         </LinearLayout>
-        </FrameLayout>
-        <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_record"
-            android:layout_width="200dp" android:layout_height="76dp" android:layout_marginTop="28dp"
-            android:text="@string/personal_home_start" android:textSize="18sp" android:textStyle="bold"
-            android:textColor="#07170F" android:textAllCaps="false" app:backgroundTint="#32B978"
-            app:cornerRadius="38dp" app:icon="@drawable/ic_camera" app:iconTint="#07170F"
-            app:iconGravity="textStart" app:iconSize="24dp" />
-        <TextView android:id="@+id/personal_home_hint" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="16dp" android:gravity="center" android:text="@string/personal_home_hint"
-            android:textSize="13sp" android:lineSpacingExtra="4dp" android:textColor="#9DB5A7" />
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="36dp" android:orientation="vertical" android:gravity="center_horizontal">
-            <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_camera"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:layout_width="wrap_content" android:layout_height="48dp"
-                android:text="@string/personal_home_back" android:textColor="#65D7A0" android:textAllCaps="false"
-                app:cornerRadius="24dp" app:strokeColor="#355346" />
-            <TextView android:id="@+id/personal_home_summary" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="12dp" android:gravity="center" android:textSize="14sp" android:textColor="#F0F7F3" />
-            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="16dp" android:orientation="horizontal" android:gravity="center">
-                <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_settings"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"
-                    android:layout_width="wrap_content" android:layout_height="48dp"
-                    android:text="@string/personal_home_settings" android:textColor="#65D7A0" android:textAllCaps="false" />
-                <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_shortcuts"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"
-                    android:layout_width="wrap_content" android:layout_height="48dp"
-                    android:text="@string/personal_home_shortcuts" android:textColor="#65D7A0" android:textAllCaps="false" />
-            </LinearLayout>
-        </LinearLayout>
+        <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_shortcuts"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="48dp" android:layout_height="48dp"
+            android:layout_gravity="end|top" android:layout_marginTop="6dp"
+            android:contentDescription="@string/personal_home_shortcuts" android:padding="0dp"
+            app:cornerRadius="24dp" app:icon="@drawable/personal_calendar_main" app:iconGravity="textStart"
+            app:iconPadding="0dp" app:iconSize="24dp" app:iconTint="@null" />
+    </FrameLayout>
+    <LinearLayout android:id="@+id/personal_quick_tools" android:layout_width="match_parent" android:layout_height="52dp"
+        android:layout_gravity="top" android:orientation="horizontal" android:gravity="center">
+        <com.google.android.material.button.MaterialButton android:id="@+id/personal_grid_control" style="@style/PersonalQuickButton" android:text="▦" android:contentDescription="@string/personal_grid" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/personal_stabilization_control" style="@style/PersonalQuickButton" android:text="◎" android:contentDescription="@string/personal_stabilization" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/personal_mic_control" style="@style/PersonalQuickButton" android:text="MIC" android:contentDescription="@string/personal_mic" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/personal_quality_control" style="@style/PersonalQuickButton" android:text="UHD\n30" android:contentDescription="@string/personal_quality" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/personal_torch_control" style="@style/PersonalQuickButton" android:text="⚡" android:contentDescription="@string/personal_torch" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_settings"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="48dp" android:layout_height="40dp"
+
+            android:contentDescription="@string/personal_home_settings" android:padding="0dp"
+            app:cornerRadius="24dp" app:icon="@drawable/ic_settings" app:iconGravity="textStart"
+            app:iconPadding="0dp" app:iconSize="24dp" app:iconTint="#FFFFFF" />
     </LinearLayout>
-</ScrollView>
+    <com.google.android.material.button.MaterialButton android:id="@+id/personal_camera_more" style="@style/PersonalQuickButton"
+        android:layout_width="48dp" android:layout_height="48dp" android:layout_gravity="top|end"
+        android:contentDescription="@string/personal_camera_adjust" app:icon="@drawable/personal_camera_more"
+        app:iconGravity="textStart" app:iconPadding="0dp" app:iconTint="#FFFFFF" app:backgroundTint="#70000000" app:cornerRadius="24dp" />
+    <LinearLayout android:id="@+id/personal_camera_mode" android:layout_width="match_parent" android:layout_height="44dp"
+        android:layout_gravity="bottom|center_horizontal" android:layout_marginBottom="24dp" android:gravity="center"
+        android:orientation="horizontal">
+        <TextView android:id="@+id/personal_camera_mode_photo" android:layout_width="0dp" android:layout_height="match_parent"
+            android:layout_weight="1" android:gravity="center" android:text="@string/personal_photo_mode"
+            android:fontFamily="sec" app:fontFamily="sec" android:includeFontPadding="false" android:textColor="#FFFFFF"
+            android:textSize="14sp" android:clickable="true" android:focusable="true" />
+        <TextView android:id="@+id/personal_camera_mode_video" android:layout_width="0dp" android:layout_height="match_parent"
+            android:layout_weight="1" android:gravity="center" android:text="@string/personal_video_mode"
+            android:fontFamily="sec" app:fontFamily="sec" android:includeFontPadding="false" android:textColor="#FFFFFF"
+            android:textSize="14sp" android:clickable="true" android:focusable="true" />
+        <TextView android:id="@+id/personal_camera_mode_pro_video" android:layout_width="0dp" android:layout_height="match_parent"
+            android:layout_weight="1" android:gravity="center" android:text="@string/personal_pro_video"
+            android:fontFamily="sec" app:fontFamily="sec" android:includeFontPadding="false" android:textColor="#FFFFFF"
+            android:textSize="14sp" android:clickable="true" android:focusable="true" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/personal_home_controls"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_gravity="bottom" android:layout_marginBottom="100dp"
+        android:gravity="center_horizontal" android:orientation="vertical"
+        android:paddingTop="0dp" android:paddingBottom="0dp">
+        <TextView android:id="@+id/personal_home_hint"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:gravity="center" android:text="@string/personal_home_permission_hint"
+            android:textColor="#FFFFFF" android:visibility="gone" />
+        <include layout="@layout/personal_pro_controls" />
+        <TextView android:id="@+id/personal_home_summary" android:visibility="gone"
+            android:layout_width="match_parent" android:layout_height="20dp"
+            android:layout_marginStart="16dp" android:layout_marginEnd="16dp"
+            android:ellipsize="end" android:gravity="center" android:maxLines="1"
+            android:textColor="#FFFFFF" android:textSize="11sp" />
+    </LinearLayout>
+    <HorizontalScrollView android:id="@+id/personal_zoom_presets_container" android:layout_width="wrap_content" android:layout_height="48dp"
+        android:layout_gravity="bottom|center_horizontal" android:layout_marginBottom="100dp" android:fillViewport="true" android:scrollbars="none">
+        <com.fadcam.ui.PersonalLensSelector android:id="@+id/personal_zoom_presets" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:gravity="center" android:orientation="horizontal" android:background="@drawable/personal_control_pill" />
+    </HorizontalScrollView>
+    <View android:id="@+id/personal_zoom_background" android:layout_width="48dp" android:layout_height="match_parent"
+        android:background="@drawable/personal_control_pill" android:visibility="gone" android:importantForAccessibility="no" />
+    <com.fadcam.ui.PersonalCameraRuler android:id="@+id/personal_zoom_slider" android:layout_width="match_parent" android:layout_height="64dp"
+        android:contentDescription="@string/personal_zoom_adjust" android:max="1000" android:visibility="gone" />
+    <LinearLayout android:id="@+id/personal_zoom_anchors" android:layout_width="48dp" android:layout_height="match_parent"
+        android:orientation="vertical" android:gravity="center" android:visibility="gone" />
+    <com.google.android.material.button.MaterialButton android:id="@+id/personal_zoom_close" style="@style/Widget.MaterialComponents.Button.TextButton"
+        android:layout_width="48dp" android:layout_height="48dp" android:minWidth="0dp" android:minHeight="0dp" android:padding="0dp"
+        android:insetTop="0dp" android:insetBottom="0dp" android:text="×" android:textSize="24sp" android:textColor="#FFFFFF"
+        android:contentDescription="@string/personal_pro_close" app:backgroundTint="#30000000" app:cornerRadius="24dp" android:visibility="gone" />
+    <com.google.android.material.button.MaterialButton android:id="@+id/personal_zoom_value" style="@style/Widget.MaterialComponents.Button.TextButton"
+        android:layout_width="72dp" android:layout_height="48dp" android:padding="0dp" android:minWidth="0dp" android:minHeight="0dp"
+        android:insetTop="0dp" android:insetBottom="0dp" android:fontFamily="sec-num-fixed" app:fontFamily="sec-num-fixed"
+        android:textFontWeight="700" android:includeFontPadding="false" android:textColor="#FFFFFF" android:text="1×" />
+    <include layout="@layout/personal_pro_adjustment" />
+        <FrameLayout android:id="@+id/personal_shutter_row" android:layout_width="match_parent" android:layout_height="96dp" android:layout_gravity="bottom"
+            android:layout_marginTop="8dp" android:paddingStart="24dp" android:paddingEnd="24dp">
+            <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_videos"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="44dp" android:layout_height="44dp" android:layout_gravity="start|center_vertical"
+                android:insetTop="0dp" android:insetBottom="0dp" android:minWidth="0dp" android:minHeight="0dp"
+                android:contentDescription="@string/personal_home_videos" android:padding="0dp"
+                app:cornerRadius="22dp" app:backgroundTint="#CC222222" app:icon="@drawable/ic_photo" app:iconGravity="textStart"
+                app:iconPadding="0dp" app:iconSize="24dp" app:iconTint="#FFFFFF" />
+            <LinearLayout android:id="@+id/personal_recording_actions"
+                android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="center"
+                android:gravity="center" android:orientation="horizontal">
+            <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_record"
+                android:layout_width="66dp" android:layout_height="66dp" android:layout_gravity="center"
+                android:contentDescription="@string/personal_home_start"
+                android:insetTop="0dp" android:insetBottom="0dp" android:minWidth="0dp" android:minHeight="0dp"
+                android:padding="0dp" app:backgroundTint="#FAFAFA" app:cornerRadius="33dp"
+                app:icon="@drawable/personal_record_start" app:iconGravity="textStart" app:iconPadding="0dp"
+                app:iconSize="28dp" app:iconTint="@null" app:strokeColor="#FFFFFF" app:strokeWidth="0dp" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_pause"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="66dp" android:layout_height="66dp" android:visibility="gone"
+                android:insetTop="0dp" android:insetBottom="0dp" android:minWidth="0dp" android:minHeight="0dp"
+                android:padding="0dp" android:contentDescription="@string/personal_home_pause"
+                app:icon="@drawable/personal_pause" app:iconGravity="textStart" app:iconPadding="0dp" app:iconSize="20dp" app:iconTint="@null" />
+            </LinearLayout>
+            <com.google.android.material.button.MaterialButton android:id="@+id/personal_home_camera"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="48dp" android:layout_height="48dp" android:layout_gravity="end|center_vertical"
+                android:contentDescription="@string/personal_home_back" android:padding="0dp"
+                app:cornerRadius="24dp" app:icon="@drawable/personal_camera_switch" app:iconGravity="textStart"
+                app:iconPadding="0dp" app:iconSize="28dp" app:iconTint="#FFFFFF" />
+        </FrameLayout>
+
+</FrameLayout>

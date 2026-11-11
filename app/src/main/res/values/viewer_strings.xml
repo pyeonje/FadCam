@@ -1,0 +1,13 @@
+<resources>
+<string name="viewer_unmute">Turn sound on</string>
+<string name="viewer_mute">Mute</string>
+<string name="viewer_seek">Video position</string>
+<string name="viewer_gallery">Gallery</string>
+<string name="viewer_details">Details</string>
+<string name="viewer_playback_settings">Playback settings</string>
+<string name="viewer_add_favorite">Add to favorites</string>
+<string name="viewer_remove_favorite">Remove from favorites</string>
+<string name="viewer_edit">Edit</string>
+    <string name="viewer_system_player">Play in Samsung video player</string>
+    <string name="viewer_external_unavailable">No compatible external editor or player is available.</string>
+</resources>

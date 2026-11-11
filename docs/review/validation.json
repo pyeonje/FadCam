@@ -1,0 +1,308 @@
+{
+  "publication_date_kst": "2026-11-12",
+  "base_commit": "21a6aa0428c352ff88d8479afaef7dbc734ab753",
+  "working_branch": "codex/samsung-parity-windows",
+  "historical_usb_candidate": {
+    "date_kst": "2026-11-02",
+    "source_manifest_sha256": "d612d3bb4afb232fe64bcccc22e6fd4cd2b78ef960ad0aea8c54150d79d52b9b",
+    "same_as_public_review_commit": false,
+    "prepared_phone_apk": {
+      "sha256": "222f3f920e77b2a75878f9e875e45f2d66bb8a4a039f2a01703ee38011d50f0c",
+      "bytes": 82973077,
+      "published": false,
+      "installed": false
+    },
+    "qa_apk_sha256": "52a942d5bd821c6240b9bfed1fa69d9315bbed6406d9be3a3539ad49a96185ff",
+    "qa_and_candidate_identical_non_signature_entries": 2602,
+    "historical_component_unique_passes": 109,
+    "historical_component_tests_all_rerun_at_final_source": false,
+    "components": [
+      {
+        "suite": "com.fadcam.opengl.PreviewDisplayContinuityTest",
+        "run": "unit-final-xml",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "ef04fdce30927825895cef56f824fcd150374120c88ff97f41008f7f20db9bef"
+      },
+      {
+        "suite": "com.fadcam.ui.PersonalHomePreviewTest",
+        "run": "unit-final-xml",
+        "tests": 58,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "a27a6c8ba6f4090005de73db54ba574b0de17afebeb8dd52e31fc0ac12c72da9"
+      },
+      {
+        "suite": "com.fadcam.ui.UsbCameraEntryTest",
+        "run": "unit-final-xml",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "a9c9027bcbd5305b239ccfc49b9f836eeed04f69c2e2323638348996c8fcce9e"
+      },
+      {
+        "suite": "com.fadcam.ui.UsbCameraIntegrationTest",
+        "run": "unit-final-xml",
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "86a58a811da9dad1d47805074ca39cf20794e12004c24017e366865b905ed541"
+      },
+      {
+        "suite": "com.fadcam.ui.PersonalLensSelectorTest",
+        "run": "unit-final2-xml",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "986cc1f01db075721c1afa1a8942d2a07cc96c75985312a9e4bdca9a70c449be"
+      },
+      {
+        "suite": "com.fadcam.ui.UsbCameraEntryTest",
+        "run": "unit-final2-xml",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "5764f58e9bcd06f87f88a5b89e3e18ac72d24d185dce67697701c9dc8b602963"
+      },
+      {
+        "suite": "com.fadcam.ui.UsbCameraIntegrationTest",
+        "run": "unit-final2-xml",
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "91b7007520002987eda69a93da88341af127125244e8aa6c7423461a0376d364"
+      },
+      {
+        "suite": "com.fadcam.ui.PersonalManualFocusControlsTest",
+        "run": "focus-unit2-xml",
+        "tests": 8,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "0cda86e1be031050fef0f0d82be6265007891a262daaee5ff91437a4e5faecf3"
+      },
+      {
+        "suite": "com.fadcam.utils.PersonalProSettingsTest",
+        "run": "focus-unit2-xml",
+        "tests": 17,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "78922a0ae5cc45283dcde1f4c6009533fea542e6fc9a842923fb45c383b1ec7c"
+      },
+      {
+        "suite": "com.fadcam.utils.RecordingFocusRequestTest",
+        "run": "focus-unit2-xml",
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "0c89ca1094c929cc3b1e962882541db301ce34b3e1db52e1303d6dd37252bac4"
+      },
+      {
+        "suite": "com.fadcam.ui.PersonalFocusVisualTest",
+        "run": "focus-visual2-xml",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "c9445d58ba5715f320e2483634197f4d42e78205a7132eb34c8d575e5f5134b8"
+      },
+      {
+        "suite": "com.fadcam.ui.PersonalLensRasterTest",
+        "run": "lens-unit3-xml",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "e3e3e4f74f11edd7daab318f162f81ad475c870dda7776f72612823e4b04207d"
+      },
+      {
+        "suite": "com.fadcam.ui.PersonalLensSelectorTest",
+        "run": "lens-unit3-xml",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "source_xml_sha256": "2e5c85771b3caceadf263cad5502fa4e6bd278ad2c1b184900cccb042b60c33f"
+      }
+    ],
+    "native_alignment": "14 native libraries passed ELF and ZIP 16 KiB checks on historical APK",
+    "native_smoke_scope": "ARM64 QA emulator only: JNI load, invalid FD rejected, USB disconnected UI",
+    "native_smoke_passed": true,
+    "physical_usb_hardware_verified": false,
+    "stock_reference": {
+      "version": "16.0.00.16",
+      "sha256": "988abf1eeff6ecd5e70c2b5a7323f2d726fdf4c736980f18b827a00eaa109e2a",
+      "scope": "Historical static REA/JADX inspection; not a runtime or current handset version check",
+      "successful_operations": 16,
+      "failed_operations": 1
+    },
+    "retained_failures": [
+      "lens-unit1 wrapper cache denied; no tests executed",
+      "unit-usb1 raster test Java8 Files.writeString compile failure; no tests executed",
+      "focus-visual1 parent digest Gradle import compile failure; no tests executed",
+      "unit-usb2 USB6PASS but unrelated concurrent focus/lens source mutation, component scope only",
+      "build1 instrumented Java checked exception declaration failure; product unchanged; build2 fixed test-only"
+    ]
+  },
+  "historical_camera_gallery_candidate": {
+    "date_kst": "2026-10-31",
+    "source_manifest_sha256": "82533523edc704571e1871ffef698a1b903890a8907e20944bfb3ad0c9f88d81",
+    "last_confirmed_phone_install_sha256": "c11020e953140f5d0b7c157dc73ceebe6f55dc9ce794b84a9d2aaa5e8fbd552d",
+    "current_phone_installation_and_runtime": "UNKNOWN",
+    "historical_avd_scope": "Actual user input on QA emulator: record/pause/resume/stop, photo/video swipe both directions, new video starts at zero; validated sample MP4"
+  },
+  "publication_only_differences": {
+    "independent_gallery_drawables": [
+      {
+        "path": "app/src/main/res/drawable/gallery_delete_outline.xml",
+        "before": "812e1efcc971b51f5bbcc68d334aaebb0e416d57d369abeb13ae3fc52d8e6548",
+        "after": "3d675d71932a0591435b2367cd1eada7df95524fb384bb2db4568298ac56b625"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_edit_outline.xml",
+        "before": "8a0fd3b94dc0da094020f22930ef30efd5a4aa841113b9cc016f8ced0d4921d8",
+        "after": "258bd2ba81e002b9ae365daabb52a43641d5e1245c315caae0bd135e51a6e0f9"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_favorite_outline.xml",
+        "before": "0e22226baabf43e89280d9746e21f9a0e60934cb63e0bf7425b352e75b4fbf5a",
+        "after": "f5201c6b4518f9e1a160573bb8ebe935d0b1c3ec5580be54d99a649a994a4bfe"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_favorite_filled.xml",
+        "before": "fdabeb635f20006a45966efc35b24b031c3a434ac9c2ec9e61bdaabdf748210c",
+        "after": "71adcef1a754ab1f7da1df1e8641b32b95e30ada84be2ce37c811dc5b0eb5765"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_share_outline.xml",
+        "before": "0c6461a824085981db4254457cb76e57b6fc1f80a10d818cae88402e129c2f07",
+        "after": "efd9b9bc3af9a055f00d4bb4ddd120d761c028fdaf19d9b159ca274735e1c73f"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_viewer_back.xml",
+        "before": "3bf54165377e71a79256d21299ff02402c10468d410617ce09d093a60aabf31a",
+        "after": "0150a0fe48a7e2b38a323274a0376a4ed032dd244a0029fb52f778314678edf8"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_viewer_pause.xml",
+        "before": "30621c0d863b5299d307b8262e4fa71f5b1cb00930c1c7b01b38c04e19f9fe4c",
+        "after": "a555aa1d95b502d9371ce1cd112ccf303b2b6b7929d74d94632de7c8136b4a74"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_viewer_play.xml",
+        "before": "7cfb264538553636bafefc18b8fb1a14755be4e656f36e1c28f058acb057c9b3",
+        "after": "0a6d19b835c136390cac855e90e193bdbe17aedc3650c41e9cbc94829e5e4377"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_viewer_sound_off.xml",
+        "before": "106316c135a05d1b6799c51c13b8b053f00e2112da62d7d60ef81c98d8cea486",
+        "after": "17adbf1454d895d05755898b63b50b0cc15f725a4b909f02c1cb66ab3713f989"
+      },
+      {
+        "path": "app/src/main/res/drawable/gallery_viewer_sound_on.xml",
+        "before": "630ac052490fd6359eb7587d3f4864c59f76e8dbf4093b8da663a2afe3a2c4a8",
+        "after": "3caa97163ea946c68b83ec092b0d349e40baf653753e5fba46a83f37643cf832"
+      }
+    ],
+    "test_path": "app/src/test/java/com/fadcam/ui/PersonalFocusVisualTest.java: portable test output directory; no changed assertions",
+    "local_build_input": "Published upstream Droid UVC AAR fetched separately and pinned; no binary redistribution in this branch",
+    "layout_whitespace": {
+      "path": "app/src/main/res/layout/activity_gallery_video_viewer.xml",
+      "before_sha256": "ff49c93cc48962a33abd52efcff8d483d18d55f8dcb00a0b3d91cfa1469f9510",
+      "after_sha256": "d545bbe37ff4531435db2c913572b582553fb8fa34643b1adaf4f11d1d69646d",
+      "scope": "Removed whitespace on otherwise empty XML lines."
+    }
+  },
+  "build_dependency": {
+    "coordinate": "io.github.mikimn:droiduvc:0.2.1",
+    "url": "https://repo.maven.apache.org/maven2/io/github/mikimn/droiduvc/0.2.1/droiduvc-0.2.1.aar",
+    "sha256": "a44a5dcb2be88318ebf4032e90e484192d3976eb19e299d2b516ae7d70fb1da0",
+    "download_reverified": true
+  },
+  "screenshots": [
+    {
+      "path": "evidence/usb-no-device.png",
+      "bytes": 77873,
+      "sha256": "4bd87be241077a2c2a89f7b12974cae76ae5595779441ed255c2be481a654de6",
+      "scope": "Actual ARM64 Android QA emulator, USB disconnected",
+      "capture_date_kst": "2026-11-02"
+    },
+    {
+      "path": "evidence/center-af.png",
+      "bytes": 120950,
+      "sha256": "7c66a6460c4acca30cc417720d8868a22afaa1f8140207d09ce7ac7963969591",
+      "scope": "Synthetic Camera2; rendered product layout, center AF",
+      "capture_date_kst": "2026-11-02"
+    },
+    {
+      "path": "evidence/multi-af.png",
+      "bytes": 119095,
+      "sha256": "9dc9070be105680ce820629155ae979bf305dbc3fe53cd28127653936816f130",
+      "scope": "Synthetic Camera2; rendered product layout, multi AF",
+      "capture_date_kst": "2026-11-02"
+    },
+    {
+      "path": "evidence/dragged-mf.png",
+      "bytes": 128287,
+      "sha256": "1b13bbc33aaf5c9eace67b137cb38b03a3e555e52957f3ccc29c88e4997b523d",
+      "scope": "Synthetic Camera2; rendered product layout, MF after ruler drag",
+      "capture_date_kst": "2026-11-02"
+    },
+    {
+      "path": "evidence/lens-rail-mid-motion.png",
+      "bytes": 10127,
+      "sha256": "0d0f14a2dc84cd7c18458f7bcc53ea4e2ff0ae63e557669e7daba2ce51a37571",
+      "scope": "Synthetic Camera2, SDK 35; forced animator fraction 0.30",
+      "capture_date_kst": "2026-11-02"
+    }
+  ],
+  "publication_validation": {
+    "resource_compile_and_link": {
+      "tool": "Android SDK AAPT2 36.0.0",
+      "replacement_drawables_passed": 10
+    },
+    "jvm": {
+      "tool": "Gradle 8.13 / JDK 17 / Robolectric",
+      "task": ":app:testDefaultDebugUnitTest",
+      "tests": 32,
+      "results": [
+        {
+          "suite": "PersonalFocusVisualTest",
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "suite": "SamsungGalleryViewerTest",
+          "tests": 21,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "suite": "SamsungGalleryPresentationTest",
+          "tests": 10,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      ],
+      "scope": "Focused run; published branch source, except whitespace-only cleanup in gallery layout and documentation",
+      "initial_attempts": "Shared Gradle Kotlin DSL cache metadata missing; isolated offline retry lacked plugin metadata. Isolated online retry completed."
+    },
+    "application_apk_built_for_publication": false,
+    "physical_device_tested": false,
+    "avd_restarted": false
+  }
+}

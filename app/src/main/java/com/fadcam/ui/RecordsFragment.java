@@ -339,6 +339,12 @@ public class RecordsFragment extends BaseFragment implements
     private RecordsAdapter recordsAdapter;
     private GalleryFastScroller fastScroller;
     private int currentGridSpan = 2;
+    private GalleryGridPinchController gridPinch;
+    private int displayedGridSpan = 2;
+    private int pendingGridAnchorPosition = RecyclerView.NO_POSITION;
+    private int pendingGridAnchorOffset;
+    private int pendingGridAnchorSpan;
+    private final Runnable adaptiveGridUpdate = this::updateAdaptiveGrid;
     private ExtendedFloatingActionButton fabDeleteSelected;
     private FloatingActionButton fabScrollNavigation; // Navigation FAB for scroll to top/bottom
     private boolean isScrollingDown = true; // Track scroll direction for FAB icon
@@ -370,15 +376,16 @@ public class RecordsFragment extends BaseFragment implements
         return SortOption.LATEST_FIRST;
     }
 
-    /** Loads the persisted grid span (falls back to 2). */
+    /** New galleries use the reference four-column grid; explicit saved densities remain unchanged. */
     private int loadPersistedGridSpan() {
         try {
             if (sharedPreferencesManager != null) {
+                if (!sharedPreferencesManager.sharedPreferences.contains(Constants.PREF_RECORDS_GRID_SPAN)) return 4;
                 int span = sharedPreferencesManager.getRecordsGridSpan();
                 if (span >= 1 && span <= 5) return span;
             }
         } catch (Exception ignored) {}
-        return 2;
+        return 4;
     }
     private SharedPreferencesManager sharedPreferencesManager;
     private SpacesItemDecoration itemDecoration; // Keep a reference
@@ -399,6 +406,12 @@ public class RecordsFragment extends BaseFragment implements
     private View selectAllContainer;
     private android.widget.ImageView selectAllCheck;
     private CharSequence originalToolbarTitle;
+    private RecyclerView galleryAlbumList;
+    private GalleryAlbumAdapter galleryAlbumAdapter;
+    private boolean galleryAlbumsSelected;
+    private boolean showingGalleryAlbums;
+    private boolean galleryFiltersVisible;
+    private String galleryQuery = "";
     private com.fadcam.ui.utils.AnimatedChip chipFilterAll;
     private com.fadcam.ui.utils.AnimatedChip chipFilterMiniApps;
     private ChipGroup chipGroupMiniAppsFilter;
@@ -550,11 +563,14 @@ public class RecordsFragment extends BaseFragment implements
             return;
         }
 
-        allLoadedItems.removeIf(item ->
+        boolean changed = allLoadedItems.removeIf(item ->
                 item == null || item.uri == null || deletedUriStrings.contains(item.uri.toString()));
-        videoItems.removeIf(item ->
+        changed |= videoItems.removeIf(item ->
                 item == null || item.uri == null || deletedUriStrings.contains(item.uri.toString()));
-        selectedUris.removeIf(uri -> uri != null && deletedUriStrings.contains(uri.toString()));
+        changed |= selectedUris.removeIf(uri -> uri != null && deletedUriStrings.contains(uri.toString()));
+        // A stored completion is read again on every resume. Do not rebind the
+        // unchanged grid or evict thumbnails that were already removed.
+        if (!changed) return;
 
         totalItems = allLoadedItems.size();
 
@@ -591,7 +607,7 @@ public class RecordsFragment extends BaseFragment implements
         RecordsDeletionSessionSnapshot snapshot = deletionSessionStore.read();
         deletionSnapshot = snapshot;
         if (snapshot != null && !snapshot.completedUriStrings.isEmpty()) {
-            applyDeletedItemsToUi(parseUriList(snapshot.completedUriStrings));
+            applyDeletedItemsToUi(parseUriList(snapshot.completedUriStrings), snapshot.operationKind.name());
         }
         renderDeletionSnapshot(snapshot, immediate);
     }
@@ -625,7 +641,9 @@ public class RecordsFragment extends BaseFragment implements
         }
 
         boolean showDock = snapshot != null && (!snapshot.completionAcknowledged)
-                && (snapshot.isActive() || snapshot.isFinished());
+                && (snapshot.isActive() || snapshot.isFinished())
+                && !(snapshot.state == RecordsDeletionSessionSnapshot.State.COMPLETED_SUCCESS
+                && snapshot.failedItemCount == 0);
         if (!showDock) {
             animateDeletionDock(false, immediate);
             return;
@@ -1675,8 +1693,7 @@ public class RecordsFragment extends BaseFragment implements
         requireActivity().getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                if (isInSelectionMode)
-                    exitSelectionMode();
+                if (RecordsFragment.this.onBackPressed()) return;
                 else {
                     if (isEnabled()) {
                         setEnabled(false);
@@ -1785,10 +1802,14 @@ public class RecordsFragment extends BaseFragment implements
 
         // Setup menu button click listener
         if (menuButton != null) {
-            menuButton.setOnClickListener(v -> showRecordsSidebar());
+            menuButton.setOnClickListener(v -> showGalleryMore());
         }
         if (closeButton != null) {
-            closeButton.setOnClickListener(v -> exitSelectionMode());
+            closeButton.setOnClickListener(v -> {
+                if (isInSelectionMode) exitSelectionMode();
+                else if (!onBackPressed() && getActivity() instanceof MainActivity)
+                    ((MainActivity) getActivity()).switchFragment(0, false);
+            });
         }
         if (deletionDockOk != null) {
             deletionDockOk.setOnClickListener(v -> acknowledgeDeletionCompletion());
@@ -1797,95 +1818,14 @@ public class RecordsFragment extends BaseFragment implements
             selectAllContainer.setVisibility(View.GONE);
         }
         if (selectAllContainer != null && selectAllCheck != null) {
-            selectAllContainer.setOnClickListener(v -> {
-                if (!isInSelectionMode)
-                    return; // ignore when not selecting
-                boolean willSelectAll = selectedUris.size() != videoItems.size() || videoItems.isEmpty();
-                if (willSelectAll) {
-                    selectedUris.clear();
-                    for (VideoItem item : videoItems) {
-                        if (item != null && item.uri != null)
-                            selectedUris.add(item.uri);
-                    }
-                } else {
-                    selectedUris.clear();
-                }
-                if (recordsAdapter != null)
-                    recordsAdapter.setSelectionModeActive(true, selectedUris);
-                // animate the header check like picker does
-                boolean allSelected = !videoItems.isEmpty() && selectedUris.size() == videoItems.size();
-                // Use unified bounce+fade animation for header check
-                if (allSelected) {
-                    selectAllContainer.setVisibility(View.VISIBLE);
-                    selectAllCheck.setVisibility(View.VISIBLE);
-                    try {
-                        android.graphics.drawable.Drawable d = selectAllCheck.getDrawable();
-                        if (d instanceof androidx.vectordrawable.graphics.drawable.AnimatedVectorDrawableCompat) {
-                            androidx.vectordrawable.graphics.drawable.AnimatedVectorDrawableCompat avd = (androidx.vectordrawable.graphics.drawable.AnimatedVectorDrawableCompat) d;
-                            avd.stop();
-                            avd.start();
-                        } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP
-                                && d instanceof android.graphics.drawable.AnimatedVectorDrawable) {
-                            android.graphics.drawable.AnimatedVectorDrawable av = (android.graphics.drawable.AnimatedVectorDrawable) d;
-                            av.stop();
-                            av.start();
-                        } else {
-                            // fallback to a quick fade in
-                            selectAllCheck.setAlpha(0f);
-                            selectAllCheck.setScaleX(0f);
-                            selectAllCheck.setScaleY(0f);
-                            android.animation.ObjectAnimator sx = android.animation.ObjectAnimator
-                                    .ofFloat(selectAllCheck, View.SCALE_X, 0f, 1f);
-                            android.animation.ObjectAnimator sy = android.animation.ObjectAnimator
-                                    .ofFloat(selectAllCheck, View.SCALE_Y, 0f, 1f);
-                            android.animation.ObjectAnimator a = android.animation.ObjectAnimator
-                                    .ofFloat(selectAllCheck, View.ALPHA, 0f, 1f);
-                            sx.setDuration(200);
-                            sy.setDuration(200);
-                            a.setDuration(160);
-                            android.animation.AnimatorSet set = new android.animation.AnimatorSet();
-                            set.playTogether(sx, sy, a);
-                            set.start();
-                        }
-                    } catch (Exception e) {
-                        /* ignore and fallback */ }
-                } else {
-                    // uncheck: fade/erase fallback; if AVD present, just fade out
-                    try {
-                        android.graphics.drawable.Drawable d = selectAllCheck.getDrawable();
-                        if (d instanceof androidx.vectordrawable.graphics.drawable.AnimatedVectorDrawableCompat) {
-                            // can't reliably reverse; fade out the view
-                            android.animation.ObjectAnimator a = android.animation.ObjectAnimator
-                                    .ofFloat(selectAllCheck, View.ALPHA, selectAllCheck.getAlpha(), 0f);
-                            a.setDuration(180);
-                            a.setInterpolator(new android.view.animation.AccelerateInterpolator());
-                            a.start();
-                        } else {
-                            android.animation.ObjectAnimator a = android.animation.ObjectAnimator
-                                    .ofFloat(selectAllCheck, View.ALPHA, selectAllCheck.getAlpha(), 0f);
-                            android.animation.ObjectAnimator sx = android.animation.ObjectAnimator
-                                    .ofFloat(selectAllCheck, View.SCALE_X, selectAllCheck.getScaleX(), 0f);
-                            android.animation.ObjectAnimator sy = android.animation.ObjectAnimator
-                                    .ofFloat(selectAllCheck, View.SCALE_Y, selectAllCheck.getScaleY(), 0f);
-                            a.setDuration(180);
-                            sx.setDuration(180);
-                            sy.setDuration(180);
-                            android.animation.AnimatorSet set = new android.animation.AnimatorSet();
-                            set.playTogether(a, sx, sy);
-                            set.start();
-                        }
-                    } catch (Exception e) {
-                        /* ignore */ }
-                    selectAllContainer.setVisibility(View.VISIBLE);
-                }
-                updateUiForSelectionMode();
-            });
+            selectAllContainer.setOnClickListener(v -> toggleSelectAllVisibleItems());
         }
         setupFilterUi();
         setupSelectionActionsUi();
+        setupGalleryPresentation(view);
         syncDeletionUiFromStore(true);
 
-        originalToolbarTitle = getString(R.string.records_title);
+        originalToolbarTitle = getString(R.string.gallery_pictures);
 
         loadingIndicator = view.findViewById(R.id.loading_indicator);
         loadingProgress = view.findViewById(R.id.loading_progress);
@@ -2080,7 +2020,8 @@ public class RecordsFragment extends BaseFragment implements
                 java.util.Date d = new java.util.Date(eventId);
                 timeView.setText(android.text.format.DateFormat.getTimeFormat(getContext()).format(d));
             }
-            banner.setVisibility(View.VISIBLE);
+            // Keep historical repair data accessible through More without covering the media grid.
+            banner.setVisibility(View.GONE);
 
             if (dismiss != null) {
                 dismiss.setOnClickListener(v -> {
@@ -2131,18 +2072,7 @@ public class RecordsFragment extends BaseFragment implements
                 checkAppLock();
             }
         }
-        // Update title text
-        if (titleText != null) {
-            CharSequence normalTitle = originalToolbarTitle != null ? originalToolbarTitle : getString(R.string.records_title);
-            if (titleText instanceof com.fadcam.ui.utils.AnimatedTextView) {
-                ((com.fadcam.ui.utils.AnimatedTextView) titleText).animateSlot(normalTitle, 300);
-            } else {
-                titleText.setText(normalTitle);
-            }
-            FLog.d(TAG, "Title text updated in onResume.");
-        } else {
-            FLog.w(TAG, "Could not update title in onResume - titleText is null.");
-        }
+        restoreSelectionUi();
         if (sharedPreferencesManager == null && getContext() != null) {
             sharedPreferencesManager = SharedPreferencesManager.getInstance(requireContext());
         }
@@ -2227,15 +2157,7 @@ public class RecordsFragment extends BaseFragment implements
             // Update AppLock state
             checkAppLock();
             
-            // Update title
-            if (titleText != null) {
-                CharSequence normalTitle = originalToolbarTitle != null ? originalToolbarTitle : getString(R.string.records_title);
-                if (titleText instanceof com.fadcam.ui.utils.AnimatedTextView) {
-                    ((com.fadcam.ui.utils.AnimatedTextView) titleText).animateSlot(normalTitle, 300);
-                } else {
-                    titleText.setText(normalTitle);
-                }
-            }
+            restoreSelectionUi();
             syncDeletionUiFromStore(true);
             
             // Always delta-scan on reappear to pick up new files (QR scans, shots, etc.)
@@ -2358,6 +2280,8 @@ public class RecordsFragment extends BaseFragment implements
         // Initialize view components
         emptyStateContainer = getView().findViewById(R.id.empty_state_container);
         recyclerView = getView().findViewById(R.id.recycler_view_records);
+        if (gridPinch != null) gridPinch.close();
+        gridPinch = new GalleryGridPinchController(recyclerView, () -> currentGridSpan, this::applyPinchGridSpan);
         loadingIndicator = getView().findViewById(R.id.loading_indicator);
 
         // Apply optimized layout settings
@@ -2388,6 +2312,16 @@ public class RecordsFragment extends BaseFragment implements
 
         // Set adapter
         recyclerView.setAdapter(recordsAdapter);
+        restoreSelectionUi();
+        // MainActivity handles configuration changes without recreating its fragments.
+        // Use the actual pane width, so rotation and split-screen both reflow in place.
+        recyclerView.addOnLayoutChangeListener((v, left, top, right, bottom,
+                oldLeft, oldTop, oldRight, oldBottom) -> {
+            // Schedule after this layout: notifying the adapter inside its own
+            // layout callback can lose the next layout request and leave stale columns.
+            if (right - left != oldRight - oldLeft) v.post(adaptiveGridUpdate);
+        });
+        recyclerView.post(adaptiveGridUpdate);
 
         // Set up month selection listener
         recordsAdapter.setOnMonthActionListener((monthKey, items) -> {
@@ -2599,11 +2533,20 @@ public class RecordsFragment extends BaseFragment implements
                 sharedPreferencesManager.setRecordsGridSpan(currentGridSpan);
             }
         } catch (Exception ignored) {}
-        setLayoutManager();
-        if (recordsAdapter != null) {
-            recordsAdapter.setGridSpan(currentGridSpan);
-        }
+        updateAdaptiveGrid();
         updateFabIcons();
+    }
+
+    private void applyPinchGridSpan(int newSpan, float focusX, float focusY) {
+        if (recyclerView == null || !(recyclerView.getLayoutManager() instanceof GridLayoutManager)
+                || newSpan == currentGridSpan) return;
+        GridLayoutManager layout = (GridLayoutManager) recyclerView.getLayoutManager();
+        View focal = recyclerView.findChildViewUnder(focusX, focusY);
+        int anchor = focal == null ? layout.findFirstVisibleItemPosition() : recyclerView.getChildAdapterPosition(focal);
+        if (focal == null && anchor != RecyclerView.NO_POSITION) focal = layout.findViewByPosition(anchor);
+        int offset = focal == null ? 0 : layout.getDecoratedTop(focal) - recyclerView.getPaddingTop();
+        applyGridSpan(newSpan);
+        if (anchor != RecyclerView.NO_POSITION) layout.scrollToPositionWithOffset(anchor, offset);
     }
 
     private void updateFabIcons() {
@@ -3095,13 +3038,10 @@ public class RecordsFragment extends BaseFragment implements
                 if (pos != -1)
                     recordsAdapter.notifyItemChanged(pos);
             }
-            Intent intent = videoItem.mediaType == VideoItem.MediaType.IMAGE
-                    ? new Intent(getActivity(), ImageViewerActivity.class)
-                    : new Intent(getActivity(), VideoPlayerActivity.class);
-            intent.setData(videoItem.uri);
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            intent.putExtra("item_category", videoItem.category.name());
-            intent.putExtra("item_display_name", videoItem.displayName);
+            // Grid and album items use the same inline Gallery entry contract as
+            // the camera's recent item (URI, media kind, grants and metadata).
+            Intent intent = RecentMediaLauncher.createIntent(requireContext(), videoItem);
+            intent.putExtra("gallery_return_to_grid", true);
             try {
                 startActivity(intent);
             } catch (Exception e) {
@@ -3212,6 +3152,12 @@ public class RecordsFragment extends BaseFragment implements
     }
 
     // --- Selection Management ---
+    /** Rebinds retained URI selection after view creation, resume or configuration changes. */
+    private void restoreSelectionUi() {
+        if (recordsAdapter != null) recordsAdapter.setSelectionModeActive(isInSelectionMode, selectedUris);
+        updateUiForSelectionMode();
+    }
+
     /** Enters selection mode and updates adapter/UI. */
     private void enterSelectionMode() {
         if (isInSelectionMode) return;
@@ -3309,14 +3255,14 @@ public class RecordsFragment extends BaseFragment implements
 
         if (isInSelectionMode) {
             int count = selectedUris.size();
-            String sizeText = count > 0 ? " • " + getSelectedItemsSizeText() : "";
-            String newTitle = count > 0 ? count + " selected" + sizeText : "Select items";
+            String newTitle = count > 0 ? count + " selected" : getString(R.string.gallery_select);
             if (titleText instanceof com.fadcam.ui.utils.AnimatedTextView) {
                 ((com.fadcam.ui.utils.AnimatedTextView) titleText).animateSlot(newTitle, 300);
             } else {
                 titleText.setText(newTitle);
             }
-            showBatchFabAnimated();
+            // The selection actions occupy the bottom bar, rather than floating over media.
+            if (fabDeleteSelected != null) { fabDeleteSelected.animate().cancel(); fabDeleteSelected.setVisibility(View.GONE); }
             if (filterChecklistButton != null) {
                 filterChecklistButton.setTextColor(resolveThemeColor(R.attr.colorToggle));
             }
@@ -3331,9 +3277,20 @@ public class RecordsFragment extends BaseFragment implements
                 menuButton.setVisibility(View.GONE);
             }
             if (selectAllContainer != null) {
-                selectAllContainer.setVisibility(View.GONE);
+                selectAllContainer.setVisibility(View.VISIBLE);
+                selectAllContainer.setContentDescription(getString(R.string.records_batch_select_all));
+            }
+            if (selectAllCheck != null) {
+                boolean allSelected = !videoItems.isEmpty() && selectedUris.size() == videoItems.size();
+                selectAllCheck.setVisibility(allSelected ? View.VISIBLE : View.INVISIBLE);
+                selectAllCheck.setAlpha(1f);
+                selectAllCheck.setScaleX(1f);
+                selectAllCheck.setScaleY(1f);
             }
         } else {
+            originalToolbarTitle = galleryAlbumsSelected
+                    ? (showingGalleryAlbums ? getString(R.string.gallery_albums) : galleryAlbumTitle(activeFilter))
+                    : getString(R.string.gallery_pictures);
             CharSequence normalTitle = originalToolbarTitle != null ? originalToolbarTitle : getString(R.string.records_title);
             if (titleText instanceof com.fadcam.ui.utils.AnimatedTextView) {
                 ((com.fadcam.ui.utils.AnimatedTextView) titleText).animateSlot(normalTitle, 300);
@@ -3348,17 +3305,20 @@ public class RecordsFragment extends BaseFragment implements
             // Restore more-options icon and hide close button
             if (menuButton != null) {
                 menuButton.setVisibility(View.VISIBLE);
-                menuButton.setImageResource(R.drawable.ic_two_line_hamburger);
-                menuButton.setOnClickListener(v -> showRecordsSidebar());
+                menuButton.setImageResource(R.drawable.ic_more_vert);
+                menuButton.setOnClickListener(v -> showGalleryMore());
                 menuButton.setContentDescription(getString(R.string.more_options));
             }
             if (closeButton != null) {
-                closeButton.setVisibility(View.GONE);
+                closeButton.setVisibility(View.VISIBLE);
+                closeButton.setImageResource(R.drawable.gallery_viewer_back);
+                closeButton.setContentDescription(getString(androidx.appcompat.R.string.abc_action_bar_up_description));
             }
             if (selectAllContainer != null) {
                 selectAllContainer.setVisibility(View.GONE);
             }
         }
+        updateGalleryPresentation();
         updateSelectionActionRow();
         // Refresh the options menu (to show/hide "More Options")
         if (getActivity() != null) {
@@ -3598,6 +3558,8 @@ public class RecordsFragment extends BaseFragment implements
                         && !item.uri.toString().contains("QRScanner")) {
                     continue;
                 }
+                if (!galleryQuery.isEmpty() && (item.displayName == null
+                        || !item.displayName.toLowerCase(Locale.getDefault()).contains(galleryQuery))) continue;
                 filteredItems.add(item);
             }
         }
@@ -3623,6 +3585,7 @@ public class RecordsFragment extends BaseFragment implements
         updateFilterHelperText();
         updateUiVisibility();
         updateSelectionActionRow();
+        updateGalleryPresentation();
     }
 
     private void updateFilterChipUi() {
@@ -3902,7 +3865,7 @@ public class RecordsFragment extends BaseFragment implements
         int checkedBg = resolveThemeColor(R.attr.colorButton);
         int uncheckedBg = androidx.core.graphics.ColorUtils.setAlphaComponent(checkedBg, 77);
         int checkedText = isDarkColor(checkedBg) ? Color.WHITE : Color.BLACK;
-        int uncheckedText = Color.WHITE;
+        int uncheckedText = isDarkColor(resolveThemeColor(android.R.attr.colorBackground)) ? Color.WHITE : Color.BLACK;
         int[][] states = new int[][]{
                 new int[]{android.R.attr.state_checked},
                 new int[]{}
@@ -4538,6 +4501,17 @@ public class RecordsFragment extends BaseFragment implements
 
     @NonNull
     private String getGalleryDestinationLabel() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            boolean images = false, videos = false;
+            for (VideoItem item : allLoadedItems) {
+                if (!selectedUris.contains(item.uri)) continue;
+                if (item.mediaType == VideoItem.MediaType.IMAGE) images = true;
+                else videos = true;
+            }
+            String folder = "/" + Constants.RECORDING_DIRECTORY;
+            if (images && videos) return "Movies" + folder + " · Pictures" + folder;
+            return (images ? "Pictures" : "Movies") + folder;
+        }
         return "Downloads/" + Constants.RECORDING_DIRECTORY;
     }
 
@@ -4553,13 +4527,12 @@ public class RecordsFragment extends BaseFragment implements
                 itemsToSave.add(item);
             }
         }
-        enqueueRecordsSaveToGallery(itemsToSave, moveFiles);
-        exitSelectionMode();
+        if (enqueueRecordsSaveToGallery(itemsToSave, moveFiles)) exitSelectionMode();
     }
 
-    private void enqueueRecordsSaveToGallery(@NonNull List<VideoItem> items, boolean moveToGallery) {
+    private boolean enqueueRecordsSaveToGallery(@NonNull List<VideoItem> items, boolean moveToGallery) {
         if (!isAdded() || items.isEmpty()) {
-            return;
+            return false;
         }
         List<RecordsDeletionRequestItem> requestItems = new ArrayList<>(items.size());
         for (VideoItem item : items) {
@@ -4575,13 +4548,20 @@ public class RecordsFragment extends BaseFragment implements
         }
         if (requestItems.isEmpty()) {
             Toast.makeText(requireContext(), R.string.records_delete_error_invalid_item, Toast.LENGTH_SHORT).show();
-            return;
+            return false;
         }
-        RecordsDeletionService.startSaveSession(requireContext(), requestItems, moveToGallery);
+        try {
+            RecordsDeletionService.startSaveSession(requireContext(), requestItems, moveToGallery);
+        } catch (RuntimeException error) {
+            FLog.w(TAG, "Unable to queue Gallery save; retaining selection", error);
+            Toast.makeText(requireContext(), R.string.records_delete_error_invalid_item, Toast.LENGTH_SHORT).show();
+            return false;
+        }
         syncDeletionUiFromStore(false);
         Toast.makeText(requireContext(),
                 getString(R.string.records_batch_save_queued, requestItems.size()),
                 Toast.LENGTH_SHORT).show();
+        return true;
     }
 
     private void exportSelectedToCustomTree(@NonNull Uri treeUri) {
@@ -4766,6 +4746,188 @@ public class RecordsFragment extends BaseFragment implements
     }
 
     // --- Options Menu & Sorting ---
+
+    private void setupGalleryPresentation(View view) {
+        searchView = view.findViewById(R.id.gallery_search_field);
+        searchView.setOnQueryTextListener(new SearchView.OnQueryTextListener() {
+            @Override public boolean onQueryTextSubmit(String query) { searchView.clearFocus(); return true; }
+            @Override public boolean onQueryTextChange(String query) {
+                galleryQuery = query == null ? "" : query.trim().toLowerCase(Locale.getDefault());
+                applyActiveFilterToUi(); return true;
+            }
+        });
+        view.findViewById(R.id.action_search).setOnClickListener(v -> {
+            if (showingGalleryAlbums) showGalleryPictures();
+            if (isInSelectionMode) exitSelectionMode();
+            isSearchViewActive = true;
+            searchView.setVisibility(View.VISIBLE); searchView.setIconified(false); searchView.requestFocus();
+        });
+        view.findViewById(R.id.gallery_tab_pictures).setOnClickListener(v -> showGalleryPictures());
+        view.findViewById(R.id.gallery_tab_albums).setOnClickListener(v -> showGalleryAlbums());
+        view.findViewById(R.id.gallery_menu).setOnClickListener(v -> showGalleryMore());
+        view.findViewById(R.id.gallery_share).setOnClickListener(v -> shareGallerySelection());
+        view.findViewById(R.id.gallery_delete).setOnClickListener(v -> {
+            if (!selectedUris.isEmpty()) confirmDeleteSelected();
+        });
+        view.findViewById(R.id.gallery_more).setOnClickListener(v -> showGallerySelectionMore(v));
+        galleryAlbumList = view.findViewById(R.id.gallery_album_list);
+        galleryAlbumList.setLayoutManager(new GridLayoutManager(requireContext(),
+                getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE ? 4 : 2));
+        galleryAlbumAdapter = new GalleryAlbumAdapter(new GalleryAlbumAdapter.Listener() {
+            @Override public String title(VideoItem.Category category) { return galleryAlbumTitle(category); }
+            @Override public void open(VideoItem.Category category) {
+                showingGalleryAlbums = false;
+                setActiveFilter(category);
+                updateGalleryPresentation(); restoreSelectionUi();
+            }
+        });
+        galleryAlbumList.setAdapter(galleryAlbumAdapter);
+        updateGalleryPresentation();
+    }
+
+    private void showGalleryPictures() {
+        galleryAlbumsSelected = false; showingGalleryAlbums = false; galleryFiltersVisible = false;
+        if (isInSelectionMode) exitSelectionMode();
+        setActiveFilter(VideoItem.Category.ALL);
+        updateGalleryPresentation(); restoreSelectionUi();
+    }
+
+    private void showGalleryAlbums() {
+        if (isInSelectionMode) exitSelectionMode();
+        if (isSearchActive()) clearSearch();
+        galleryAlbumsSelected = true; showingGalleryAlbums = true; galleryFiltersVisible = false;
+        updateGalleryPresentation(); restoreSelectionUi();
+    }
+
+    private String galleryAlbumTitle(VideoItem.Category category) {
+        switch (category) {
+            case CAMERA: return getString(R.string.records_filter_camera);
+            case SCREEN: return getString(R.string.records_filter_screen);
+            case FADITOR: return getString(R.string.records_filter_faditor);
+            case STREAM: return getString(R.string.records_filter_stream);
+            case SHOT: return getString(R.string.records_filter_shot);
+            case MINIAPPS: return "Mini Apps";
+            case ALL: return getString(R.string.gallery_pictures);
+            default: return getString(R.string.gallery_other);
+        }
+    }
+
+    private void updateGalleryPresentation() {
+        View view = getView(); if (view == null) return;
+        View tabs = view.findViewById(R.id.gallery_tabs);
+        View selection = view.findViewById(R.id.gallery_selection_bar);
+        if (tabs != null) tabs.setVisibility(isInSelectionMode ? View.GONE : View.VISIBLE);
+        if (selection != null) selection.setVisibility(isInSelectionMode ? View.VISIBLE : View.GONE);
+        View search = view.findViewById(R.id.action_search);
+        if (search != null) search.setVisibility(isInSelectionMode ? View.GONE : View.VISIBLE);
+        for (int id : new int[]{R.id.gallery_share, R.id.gallery_delete, R.id.gallery_more}) {
+            View action = view.findViewById(id);
+            if (action != null) { action.setEnabled(!selectedUris.isEmpty()); action.setAlpha(selectedUris.isEmpty() ? .4f : 1f); }
+        }
+        for (int id : new int[]{R.id.gallery_tab_pictures, R.id.gallery_tab_albums}) {
+            TextView tab = view.findViewById(id);
+            if (tab != null) tab.setTypeface(android.graphics.Typeface.create("sec", android.graphics.Typeface.NORMAL), (id == R.id.gallery_tab_albums) == galleryAlbumsSelected
+                    ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+        }
+        if (showingGalleryAlbums && galleryAlbumAdapter != null) galleryAlbumAdapter.update(allLoadedItems,
+                sharedPreferencesManager != null && sharedPreferencesManager.isHideThumbnailsEnabled());
+        if (galleryAlbumList != null) galleryAlbumList.setVisibility(showingGalleryAlbums ? View.VISIBLE : View.GONE);
+        View swipe = view.findViewById(R.id.swipe_refresh_layout);
+        if (swipe != null) swipe.setVisibility(showingGalleryAlbums ? View.INVISIBLE : View.VISIBLE);
+        View scroller = view.findViewById(R.id.fast_scroller);
+        if (scroller != null) scroller.setVisibility(showingGalleryAlbums ? View.GONE : View.VISIBLE);
+        View stats = view.findViewById(R.id.records_header_stats_row);
+        if (stats != null) stats.setVisibility(View.GONE);
+        View filters = view.findViewById(R.id.records_filter_row);
+        if (filters != null) filters.setVisibility(galleryFiltersVisible && !showingGalleryAlbums ? View.VISIBLE : View.GONE);
+        if (!galleryFiltersVisible || showingGalleryAlbums) {
+            for (int id : new int[]{R.id.records_camera_filter_row, R.id.records_faditor_filter_row,
+                    R.id.records_shot_filter_row, R.id.records_miniapps_filter_row, R.id.filter_helper_text}) {
+                View row = view.findViewById(id); if (row != null) { row.animate().cancel(); row.setVisibility(View.GONE); }
+            }
+        }
+    }
+
+    private void showGallerySelectionMore(@NonNull View anchor) {
+        if (!isAdded() || selectedUris.isEmpty()) return;
+        createGallerySelectionMenu(anchor).show();
+    }
+
+    /** Anchor to the real visible selection control, never an unattached recycled tile. */
+    androidx.appcompat.widget.PopupMenu createGallerySelectionMenu(@NonNull View anchor) {
+        android.content.Context popupContext = new androidx.appcompat.view.ContextThemeWrapper(
+                anchor.getContext(), R.style.ThemeOverlay_PersonalSamsungVideoPopup);
+        androidx.appcompat.widget.PopupMenu menu = new androidx.appcompat.widget.PopupMenu(
+                popupContext, anchor, android.view.Gravity.END,
+                androidx.appcompat.R.attr.popupMenuStyle, 0);
+        menu.getMenu().add(0, 1, 0, R.string.video_menu_save_copy);
+        menu.getMenu().add(0, 2, 1, R.string.video_menu_save_move);
+        menu.getMenu().add(0, 3, 2, R.string.more_options);
+        menu.setOnMenuItemClickListener(item -> {
+            if (selectedUris.isEmpty()) return false;
+            if (item.getItemId() == 1) queueBatchSaveToGallery(false);
+            else if (item.getItemId() == 2) queueBatchSaveToGallery(true);
+            else if (item.getItemId() == 3) {
+                if (selectedUris.size() == 1 && recordsAdapter != null) {
+                    recordsAdapter.showFileActions(selectedUris.get(0), recyclerView);
+                } else showBatchActionsSheet();
+            } else return false;
+            return true;
+        });
+        return menu;
+    }
+
+    private void showGalleryMore() {
+        if (getView() == null) return;
+        View anchor = getView().findViewById(R.id.action_more_options);
+        androidx.appcompat.widget.PopupMenu menu = new androidx.appcompat.widget.PopupMenu(anchor.getContext(), anchor);
+        menu.getMenu().add(0, 1, 0, R.string.gallery_select);
+        menu.getMenu().add(0, 2, 1, R.string.gallery_filters);
+        menu.getMenu().add(0, 3, 2, R.string.more_options);
+        menu.getMenu().add(0, 5, 4, R.string.scroll_to_top);
+        menu.getMenu().add(0, 6, 5, R.string.scroll_to_bottom);
+        boolean repairs = sharedPreferencesManager != null && !sharedPreferencesManager.getRecordingRepairEvents().isEmpty();
+        if (repairs) menu.getMenu().add(0, 4, 3, R.string.records_repair_banner_title);
+        menu.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == 1) { if (showingGalleryAlbums) showGalleryPictures(); enterSelectionMode(); }
+            else if (item.getItemId() == 2) { showingGalleryAlbums = false; galleryFiltersVisible = !galleryFiltersVisible;
+                applyActiveFilterToUi(); updateGalleryPresentation(); }
+            else if (item.getItemId() == 3) showRecordsSidebar();
+            else if ((item.getItemId() == 5 || item.getItemId() == 6) && recyclerView != null && recordsAdapter != null) {
+                recyclerView.scrollToPosition(item.getItemId() == 5 ? 0 : Math.max(0, recordsAdapter.getItemCount() - 1));
+            }
+            else if (item.getItemId() == 4) {
+                StringBuilder text = new StringBuilder();
+                for (String[] event : sharedPreferencesManager.getRecordingRepairEvents()) {
+                    if (event.length >= 3) text.append(event[0]).append("  ").append(event[1]).append("\n")
+                            .append(event[2]).append("\n\n");
+                }
+                new MaterialAlertDialogBuilder(requireContext()).setTitle(R.string.records_repair_banner_title)
+                        .setMessage(text.toString()).setPositiveButton(android.R.string.ok, null).show();
+            }
+            return true;
+        });
+        menu.show();
+    }
+
+    private void shareGallerySelection() {
+        if (selectedUris.isEmpty()) return;
+        ArrayList<Uri> streams = new ArrayList<>();
+        try {
+            for (Uri uri : selectedUris) {
+                if ("file".equals(uri.getScheme())) uri = androidx.core.content.FileProvider.getUriForFile(
+                        requireContext(), requireContext().getPackageName() + ".provider", new File(uri.getPath()));
+                if (!"content".equals(uri.getScheme())) return;
+                streams.add(uri);
+            }
+            Intent intent = new Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*")
+                    .putParcelableArrayListExtra(Intent.EXTRA_STREAM, streams).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            android.content.ClipData clip = android.content.ClipData.newRawUri("", streams.get(0));
+            for (int i = 1; i < streams.size(); i++) clip.addItem(new android.content.ClipData.Item(streams.get(i)));
+            intent.setClipData(clip);
+            startActivity(Intent.createChooser(intent, getString(R.string.gallery_share)));
+        } catch (RuntimeException error) { FLog.w(TAG, "Unable to open share chooser", error); }
+    }
 
     private void showRecordsSidebar() {
         if (getActivity() == null)
@@ -4997,9 +5159,10 @@ public class RecordsFragment extends BaseFragment implements
         if (searchView != null) {
             searchView.setQuery("", false);
             searchView.setIconified(true);
+            searchView.setVisibility(View.GONE);
             isSearchViewActive = false;
-            // Reload original data without filter
-            loadRecordsList();
+            galleryQuery = "";
+            applyActiveFilterToUi();
         }
     }
 
@@ -5015,22 +5178,32 @@ public class RecordsFragment extends BaseFragment implements
     // Override the onBackPressed method from BaseFragment
     @Override
     protected boolean onBackPressed() {
+        // Selection is the foremost transient state, even when search remains active.
+        if (isInSelectionMode()) {
+            exitSelectionMode();
+            return true;
+        }
         // If search is active, clear it instead of navigating back
         if (isSearchActive()) {
             clearSearch();
             return true;
         }
 
-        // If in selection mode, exit selection mode instead of navigating back
-        if (isInSelectionMode()) {
-            exitSelectionMode();
+        if (galleryAlbumsSelected && !showingGalleryAlbums) {
+            showGalleryAlbums();
             return true;
         }
-
-        // Handle any other specific cases here
-
+        if (showingGalleryAlbums) {
+            showGalleryPictures();
+            return true;
+        }
         // For normal cases, let the default implementation handle it
         return false;
+    }
+
+    /** The activity's later back callbacks must defer to the visible Gallery state. */
+    public boolean handleBackWithinGallery() {
+        return onBackPressed();
     }
 
     /**
@@ -5099,19 +5272,98 @@ public class RecordsFragment extends BaseFragment implements
     // Restore this important method that was removed
     private void setLayoutManager() {
         if (recyclerView != null) {
-            GridLayoutManager grid = new GridLayoutManager(getContext(), currentGridSpan);
+            displayedGridSpan = resolveGridSpan();
+            GridLayoutManager grid = new GridLayoutManager(getContext(), displayedGridSpan);
             grid.setSpanSizeLookup(new GridLayoutManager.SpanSizeLookup() {
                 @Override
                 public int getSpanSize(int position) {
                     if (recordsAdapter != null && recordsAdapter.getItemViewType(position) == 0) {
-                        return currentGridSpan; // Month headers span full width
+                        return displayedGridSpan; // Month headers span full width
                     }
                     return 1;
                 }
             });
             recyclerView.setLayoutManager(grid);
+            if (recordsAdapter != null) recordsAdapter.setGridSpan(displayedGridSpan);
             FLog.d(TAG, "LayoutManager set to GridLayout with " + currentGridSpan + " columns");
         }
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull android.content.res.Configuration newConfig) {
+        captureGridAnchorBeforeConfiguration(newConfig);
+        super.onConfigurationChanged(newConfig);
+        if (galleryAlbumList != null && galleryAlbumList.getLayoutManager() instanceof GridLayoutManager) {
+            ((GridLayoutManager) galleryAlbumList.getLayoutManager()).setSpanCount(
+                    newConfig.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE ? 4 : 2);
+        }
+        restoreSelectionUi();
+        // Keep the same view/adapter. Width is authoritative once the new pane is laid out.
+        if (recyclerView != null) recyclerView.post(adaptiveGridUpdate);
+    }
+
+    private void captureGridAnchorBeforeConfiguration(android.content.res.Configuration newConfig) {
+        clearPendingGridAnchor();
+        if (recyclerView == null || !(recyclerView.getLayoutManager() instanceof GridLayoutManager)) return;
+        if (newConfig.screenWidthDp <= 0 || newConfig.screenHeightDp <= 0) return;
+        GridLayoutManager grid = (GridLayoutManager) recyclerView.getLayoutManager();
+        int targetSpan = GalleryLayoutPolicy.columns(currentGridSpan, newConfig.screenWidthDp,
+                Math.min(newConfig.screenWidthDp, newConfig.screenHeightDp));
+        if (targetSpan == grid.getSpanCount()) return;
+        int position = grid.findFirstVisibleItemPosition();
+        View first = position == RecyclerView.NO_POSITION ? null : grid.findViewByPosition(position);
+        if (first == null) return;
+        // Snapshot before the old column count lays out at the new width/height.
+        pendingGridAnchorPosition = position;
+        pendingGridAnchorOffset = grid.getDecoratedTop(first) - recyclerView.getPaddingTop();
+        pendingGridAnchorSpan = targetSpan;
+    }
+
+    private void clearPendingGridAnchor() {
+        pendingGridAnchorPosition = RecyclerView.NO_POSITION;
+        pendingGridAnchorOffset = 0;
+        pendingGridAnchorSpan = 0;
+    }
+
+    @Override
+    public void onDestroyView() {
+        if (gridPinch != null) { gridPinch.close(); gridPinch = null; }
+        clearPendingGridAnchor();
+        if (recyclerView != null) recyclerView.removeCallbacks(adaptiveGridUpdate);
+        if (galleryAlbumList != null) galleryAlbumList.setAdapter(null);
+        galleryAlbumList = null;
+        galleryAlbumAdapter = null;
+        searchView = null;
+        super.onDestroyView();
+    }
+
+    private int resolveGridSpan() {
+        if (recyclerView == null) return currentGridSpan;
+        android.content.res.Configuration config = getResources().getConfiguration();
+        float density = getResources().getDisplayMetrics().density;
+        int shortEdge = Math.round(Math.min(config.screenWidthDp, config.screenHeightDp) * density);
+        return GalleryLayoutPolicy.columns(currentGridSpan,
+                recyclerView.getWidth() - recyclerView.getPaddingLeft() - recyclerView.getPaddingRight(), shortEdge);
+    }
+
+    private void updateAdaptiveGrid() {
+        if (recyclerView == null || !(recyclerView.getLayoutManager() instanceof GridLayoutManager)) return;
+        GridLayoutManager grid = (GridLayoutManager) recyclerView.getLayoutManager();
+        int span = resolveGridSpan();
+        if (grid.getSpanCount() == span) return;
+        int anchor = grid.findFirstVisibleItemPosition();
+        View first = anchor == RecyclerView.NO_POSITION ? null : grid.findViewByPosition(anchor);
+        int offset = first == null ? 0 : grid.getDecoratedTop(first) - recyclerView.getPaddingTop();
+        if (pendingGridAnchorPosition != RecyclerView.NO_POSITION && pendingGridAnchorSpan == span) {
+            anchor = pendingGridAnchorPosition;
+            offset = pendingGridAnchorOffset;
+        }
+        clearPendingGridAnchor();
+        displayedGridSpan = span;
+        grid.setSpanCount(span);
+        if (recordsAdapter != null) recordsAdapter.setGridSpan(span);
+        // Keep the same media/month anchor; adapter and URI-based selection are retained.
+        if (anchor != RecyclerView.NO_POSITION) grid.scrollToPositionWithOffset(anchor, offset);
     }
 
     // Restore and optimize the getNextPage method
@@ -5341,7 +5593,8 @@ public class RecordsFragment extends BaseFragment implements
 
     private int resolveThemeColor(int attr) {
         android.util.TypedValue typedValue = new android.util.TypedValue();
-        requireContext().getTheme().resolveAttribute(attr, typedValue, true);
+        Context themed = getView() != null ? getView().getContext() : requireContext();
+        themed.getTheme().resolveAttribute(attr, typedValue, true);
         return typedValue.data;
     }
 
@@ -5549,6 +5802,33 @@ public class RecordsFragment extends BaseFragment implements
         loadRecordsList(false);
     }
 
+    /** Refresh a warm grid once from the final filesystem view, never stale DB then delta. */
+    private void refreshLoadedRecords(@NonNull com.fadcam.data.VideoIndexRepository repository) {
+        if (deltaExecutor == null || deltaExecutor.isShutdown()) {
+            deltaExecutor = Executors.newSingleThreadExecutor();
+        }
+        deltaExecutor.submit(() -> {
+            try {
+                List<VideoItem> fresh = normalizeVideoCategories(repository.deltaScan(sharedPreferencesManager));
+                sortItems(fresh, currentSortOption);
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (!isAdded()) return;
+                    totalItems = fresh.size();
+                    allLoadedItems.clear();
+                    allLoadedItems.addAll(fresh);
+                    com.fadcam.utils.VideoSessionCache.updateSessionCache(fresh);
+                    isLoading = false;
+                    isInitialLoad = false;
+                    applyActiveFilterToUi();
+                    drainPendingRealtimeRefresh();
+                });
+            } catch (Exception e) {
+                FLog.w(TAG, "Warm records refresh failed; retaining displayed grid", e);
+                new Handler(Looper.getMainLooper()).post(this::handleLoadingError);
+            }
+        });
+    }
+
     @SuppressLint("NotifyDataSetChanged")
     private void loadRecordsList(boolean forceReload) {
         FLog.d(TAG, "loadRecordsList: start, storageMode=" + sharedPreferencesManager.getStorageMode()
@@ -5576,6 +5856,10 @@ public class RecordsFragment extends BaseFragment implements
 
         final com.fadcam.data.VideoIndexRepository repository =
                 com.fadcam.data.VideoIndexRepository.getInstance(requireContext());
+        if (forceReload && !allLoadedItems.isEmpty()) {
+            refreshLoadedRecords(repository);
+            return;
+        }
         prepareRecordsFirstPaint();
 
         final int indexedCount = repository.getIndexedCount();
@@ -6219,6 +6503,10 @@ public class RecordsFragment extends BaseFragment implements
      * Updates navigation FAB visibility and icon based on scroll direction
      */
     private void updateNavigationFab() {
+        if (getView() != null && getView().findViewById(R.id.gallery_tabs) != null) {
+            if (fabScrollNavigation != null) { fabScrollNavigation.animate().cancel(); fabScrollNavigation.setVisibility(View.GONE); }
+            return; // Equivalent navigation remains in More and the fast scroller.
+        }
         if (fabScrollNavigation == null || recyclerView == null)
             return;
 
@@ -6300,6 +6588,10 @@ public class RecordsFragment extends BaseFragment implements
 
     // (No delayed hide) Fade animation helper
     private void showNavigationFab() {
+        if (getView() != null && getView().findViewById(R.id.gallery_tabs) != null) {
+            if (fabScrollNavigation != null) fabScrollNavigation.setVisibility(View.GONE);
+            return;
+        }
         if (fabScrollNavigation == null)
             return;
         // Ensure fully visible

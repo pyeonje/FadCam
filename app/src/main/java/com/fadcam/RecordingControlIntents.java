@@ -11,6 +11,10 @@ public final class RecordingControlIntents {
 
     private RecordingControlIntents() {}
 
+    public static Intent applyProSettings(Context ctx) {
+        return new Intent(ctx, RecordingService.class).setAction(com.fadcam.utils.PersonalProSettings.ACTION_APPLY);
+    }
+
     public static Intent setExposureCompensation(Context ctx, int evIndex) {
         Intent i = new Intent(ctx, RecordingService.class);
         i.setAction(Constants.INTENT_ACTION_SET_EXPOSURE_COMPENSATION);

@@ -81,6 +81,10 @@ public class RecordingToggleActivityTest {
         RecordingService service = Robolectric.buildService(RecordingService.class).get();
         ReflectionHelpers.setStaticField(RecordingService.class, "liveInstance", service);
         assertFalse(RecordingService.hasActiveSession()); // Merely querying creates an idle service.
+        ReflectionHelpers.setField(service, "previewOnlyActive", true);
+        assertTrue(RecordingService.hasPreviewOnlySession());
+        assertFalse(RecordingService.hasActiveSession()); // Idle preview must not turn quick Start into Stop.
+        ReflectionHelpers.setField(service, "previewOnlyActive", false);
         ReflectionHelpers.setField(service, "recordingState", RecordingState.STARTING);
         assertTrue(RecordingService.hasActiveSession());
         ReflectionHelpers.setField(service, "recordingState", RecordingState.PAUSED);

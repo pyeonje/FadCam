@@ -1,0 +1,4 @@
+Droid UVC 0.2.1 (Apache-2.0), https://github.com/mikimn/droiduvc
+Published AAR SHA-256: a44a5dcb2be88318ebf4032e90e484192d3976eb19e299d2b516ae7d70fb1da0
+Includes libuvc (BSD-3-Clause), libusb (LGPL-2.1-or-later), libjpeg-turbo (IJG/BSD/zlib); see accompanying license files.
+Unmodified published binary and corresponding source links are retained.

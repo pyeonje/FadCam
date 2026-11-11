@@ -101,6 +101,7 @@ public class MainActivity extends AppCompatActivity {
     private int swipeTouchSlop = 0;
     private static final float SWIPE_HORIZONTAL_RATIO = 1.35f;
     private boolean previewGestureInProgress = false;
+    private boolean personalCameraFullscreen = false;
     /** True while the home quick-actions rearrange (jiggle) mode is active —
      *  tab-swipes and the sidebar-open swipe must not interfere with dragging. */
     private boolean quickActionsRearrangeActive = false;
@@ -786,6 +787,7 @@ public class MainActivity extends AppCompatActivity {
         ViewParent parent = touchedView.getParent();
         View current = touchedView;
         while (current != null) {
+            if (current.getId() == R.id.personal_camera_viewport) return true;
             if (current instanceof HorizontalScrollView) return true;
             if (current.getId() == R.id.tutorial_scroll) return true;
             // The mode switcher is included with <include id="mode_switcher">,
@@ -816,6 +818,32 @@ public class MainActivity extends AppCompatActivity {
             parent = current.getParent();
         }
         return false;
+    }
+
+    public void setPersonalCameraFullscreen(boolean fullscreen) {
+        if (personalCameraFullscreen == fullscreen) return;
+        personalCameraFullscreen = fullscreen;
+        for (int id : new int[] {R.id.status_bar_scrim, R.id.dock_focus_gradient_scrim}) {
+            View chrome = findViewById(id);
+            if (chrome != null) chrome.setVisibility(fullscreen ? View.GONE : View.VISIBLE);
+        }
+        androidx.core.view.WindowInsetsControllerCompat bars =
+                androidx.core.view.WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        if (fullscreen) {
+            bars.setSystemBarsBehavior(androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            bars.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars());
+        } else bars.show(androidx.core.view.WindowInsetsCompat.Type.systemBars());
+        View content = findViewById(android.R.id.content);
+        if (content != null) androidx.core.view.ViewCompat.requestApplyInsets(content);
+        updatePersonalNavigationChrome();
+    }
+
+    private void updatePersonalNavigationChrome() {
+        boolean hideDock = personalCameraFullscreen || currentFragmentPosition == 1;
+        View dock = findViewById(R.id.nav_container);
+        if (dock != null) dock.setVisibility(hideDock ? View.GONE : View.VISIBLE);
+        View gradient = findViewById(R.id.dock_focus_gradient_scrim);
+        if (gradient != null) gradient.setVisibility(hideDock ? View.GONE : View.VISIBLE);
     }
 
     public void setPreviewGestureInProgress(boolean inProgress, float zoomRatio) {
@@ -865,6 +893,23 @@ public class MainActivity extends AppCompatActivity {
             if (target != null) return target;
         }
         return view;
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+    }
+
+    @Override
+    protected void onPostResume() {
+        super.onPostResume();
+        Intent intent = getIntent();
+        if (intent != null && intent.getBooleanExtra("com.fadcam.extra.OPEN_GALLERY", false)) {
+            intent.removeExtra("com.fadcam.extra.OPEN_GALLERY");
+            // Viewer → Gallery reuses this activity. Wait until FragmentManager is resumed.
+            switchFragment(1, false);
+        }
     }
 
     private void handleWidgetIntent() {
@@ -1027,6 +1072,8 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
 
+                if (handleGalleryBack()) return;
+
                 // If we're not on the home tab, go to home tab first before exiting
                 if (getCurrentFragmentPosition() != 0) {
                     switchFragment(0, true); // Enable animation
@@ -1065,6 +1112,8 @@ public class MainActivity extends AppCompatActivity {
         if (handleOverlayBack()) {
             return;
         }
+
+        if (handleGalleryBack()) return;
 
         // If we're not on the home tab, go to home tab first before exiting
         if (getCurrentFragmentPosition() != 0) {
@@ -1311,6 +1360,14 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
+    /** Let Gallery consume selection/search/album back before tab navigation. */
+    private boolean handleGalleryBack() {
+        if (getCurrentFragmentPosition() != 1) return false;
+        Fragment current = getCurrentFragment();
+        return current instanceof RecordsFragment
+                && ((RecordsFragment) current).handleBackWithinGallery();
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -1380,6 +1437,8 @@ public class MainActivity extends AppCompatActivity {
                     if (handleOverlayBack()) {
                         return; // handled
                     }
+
+                    if (handleGalleryBack()) return;
 
                     // If we're not on the home tab, go to home tab first before exiting
                     if (getCurrentFragmentPosition() != 0) {
@@ -1680,7 +1739,8 @@ public class MainActivity extends AppCompatActivity {
             for (int i = 0; i < 6; i++) {
                 for (String tag : getFragmentTagsForPosition(i)) {
                     Fragment f = fm.findFragmentByTag(tag);
-                    if (f != null) {
+                    if (f != null && !(f instanceof com.fadcam.ui.PersonalHomeFragment)
+                            && !(f instanceof com.fadcam.ui.RecordsFragment)) {
                         detachTx.detach(f);
                         FLog.d("MainActivity", "Orientation: detaching fragment at position " + i + ": " + f.getClass().getSimpleName());
                     }
@@ -1694,7 +1754,8 @@ public class MainActivity extends AppCompatActivity {
                 String visibleTag = i == 0 ? getHomeFragmentTagForCurrentMode() : FRAGMENT_TAG_PREFIX + i;
                 for (String tag : getFragmentTagsForPosition(i)) {
                     Fragment f = fm.findFragmentByTag(tag);
-                    if (f != null) {
+                    if (f != null && !(f instanceof com.fadcam.ui.PersonalHomeFragment)
+                            && !(f instanceof com.fadcam.ui.RecordsFragment)) {
                         attachTx.attach(f);
                         if (i != currentFragmentPosition || !tag.equals(visibleTag)) {
                             attachTx.hide(f);
@@ -1720,6 +1781,14 @@ public class MainActivity extends AppCompatActivity {
      * Called from onResume to ensure colors are correct when returning from background.
      */
     private void restoreBarColorsForCurrentTab() {
+        if (currentFragmentPosition == 1 && !personalCameraFullscreen) {
+            setBottomNavColor(0xFFFCFCFF);
+            setStatusBarColor(0xFFFCFCFF);
+            setNavigationBarColor(0xFFFCFCFF);
+            setStatusBarIconsLight(true);
+            setNavigationBarIconsLight(true);
+            return;
+        }
         setBottomNavColor(0xFF171A1C);
         setStatusBarColor(0xFF111315);
         setNavigationBarColor(0xFF171A1C);
@@ -1778,15 +1847,15 @@ public class MainActivity extends AppCompatActivity {
                 // On TV/Wear: no status bar, no dock → all padding = 0.
                 ((ViewGroup) fragmentContainer).setClipToPadding(false);
                 ((ViewGroup) fragmentContainer).setClipChildren(false);
-                int contentTopPadding = isFormFactorTV ? 0 : systemBars.top;
+                int contentTopPadding = isFormFactorTV || personalCameraFullscreen ? 0 : systemBars.top;
                 // Fragment spans full screen (floating dock UX):
                 // paddingBottom = only the system gesture bar so the last interactive
                 // element is never hidden behind the gesture area.
                 // Dock clearance is handled per-fragment via layout_marginBottom=72dp.
-                int contentBottomPadding = isFormFactorTV ? 0 : systemBars.bottom;
+                int contentBottomPadding = isFormFactorTV || personalCameraFullscreen ? 0 : systemBars.bottom;
                 fragmentContainer.setPadding(
-                        systemBars.left, contentTopPadding,
-                        systemBars.right, contentBottomPadding);
+                        personalCameraFullscreen ? 0 : systemBars.left, contentTopPadding,
+                        personalCameraFullscreen ? 0 : systemBars.right, contentBottomPadding);
             }
             if (overlayContainer != null) {
                 // Apply same insets to overlay container (for Trash, Settings sheets, etc.)
@@ -1803,11 +1872,10 @@ public class MainActivity extends AppCompatActivity {
             // The scrim floats over fragment_container via elevation="11dp".
             // On TV/Wear: hide scrim (GONE). On phones: set to actual status bar height.
             if (statusBarScrim != null) {
-                if (isFormFactorTV) {
+                if (isFormFactorTV || personalCameraFullscreen || systemBars.top == 0) {
                     // GONE is definitive — a GONE view never renders regardless of constraints.
                     // Setting height=0 on a MATCH_CONSTRAINT view doesn't reliably suppress it.
                     statusBarScrim.setVisibility(View.GONE);
-                    FLog.i("MainActivity", "TV/Wear: status_bar_scrim set to GONE");
                 } else {
                     statusBarScrim.setVisibility(View.VISIBLE);
                     int scrimHeight = systemBars.top;
@@ -2099,6 +2167,7 @@ public class MainActivity extends AppCompatActivity {
      * Replaces old ViewPager2.OnPageChangeCallback logic.
      */
     private void handleTabSelected(int position) {
+        updatePersonalNavigationChrome();
         // Update bottom nav selection
         int navItemId = getNavItemIdForPosition(position);
         if (navItemId != -1) {
