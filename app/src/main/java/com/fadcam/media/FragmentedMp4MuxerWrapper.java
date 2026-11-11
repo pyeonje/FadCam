@@ -53,7 +53,7 @@ public class FragmentedMp4MuxerWrapper {
     private int videoTrackIndex = -1;
     private int audioTrackIndex = -1;
     
-    // Track count for timestamp offset initialization
+    // Expected track count for choosing a common fragment origin
     private int trackCount = 0;
     
     // Fragment tracking for live streaming
@@ -61,13 +61,12 @@ public class FragmentedMp4MuxerWrapper {
     private int nextFragmentNumber = 0;
     private boolean initSegmentSent = false;
     
-    // CRITICAL FIX: Timestamp normalization to prevent serving 45+ minute old video
-    // MediaCodec timestamps accumulate across recording sessions (based on system uptime)
-    // We must normalize them to start from 0 for each new recording
-    private final android.util.SparseArray<Long> timestampOffsets = new android.util.SparseArray<>();
-    private boolean timestampOffsetsInitialized = false;
-    // Track how many samples logged per track to avoid log spam
-    private final android.util.SparseArray<Integer> trackSampleLogs = new android.util.SparseArray<>();
+    // Each encoder supplies timestamps on the same capture clock. The final Media3 moov
+    // computes edit lists from that clock; only the fragment writer needs the missing origin.
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Long> firstTrackPtsUs =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private long fragmentLowerBoundUs;
+    private long fragmentOriginUs = -1; // writer thread only
 
     // Cached streaming manager reference to avoid repeated getInstance() calls
     private RemoteStreamManager cachedStreamManager;
@@ -303,57 +302,11 @@ public class FragmentedMp4MuxerWrapper {
             }
 
             try {
-            // CRITICAL FIX: Normalize timestamps to start from 0 for each recording
-            // MediaCodec provides timestamps based on system uptime which accumulates across sessions
-            // This causes HLS players to show 45+ minute old timestamps
-            if (!timestampOffsetsInitialized) {
-                // First sample for this track - use its timestamp as the offset
-                Long offset = timestampOffsets.get(trackIndex);
-                if (offset == null) {
-                    timestampOffsets.put(trackIndex, bufferInfo.presentationTimeUs);
-                    // timestamp offset initialized for this track
-                }
-                
-                // Check if all tracks have offsets
-                if (timestampOffsets.size() >= trackCount) {
-                    timestampOffsetsInitialized = true;
-                    FLog.i(TAG, "✅ All track timestamp offsets initialized - timestamps will now start from 0");
-                }
-            }
-            
-            // Normalize timestamp by subtracting the offset for this track
-            Long offset = timestampOffsets.get(trackIndex);
-            long normalizedPresentationTimeUs = offset != null ? 
-                (bufferInfo.presentationTimeUs - offset) : bufferInfo.presentationTimeUs;
-
-            // DEBUG: Log keyframes and first few samples with normalized PTS for diagnostics
-            boolean isKeyFrame = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
-            int logCount = trackSampleLogs.get(trackIndex, 0);
-            // Verbose logging reduced per user request - only log first 3 samples to verify initialization
-            if (logCount < 3) {
-                // [MUXER] PTS normalize logging removed (was noisy)
-                trackSampleLogs.put(trackIndex, logCount + 1);
-            }
-            
-            // VLC debugging logs - reduced verbosity (was spamming hundreds of lines)
-            // Uncomment for VLC-specific debugging:
-            // if (trackIndex == audioTrackIndex && audioTrackIndex != -1 && logCount < 5) {
-            //     FLog.d(TAG, String.format("[VLC-AUDIO] Sample #%d: pts=%dus, size=%d, origFlags=0x%X, hasKeyFlag=%b",
-            //         logCount, normalizedPresentationTimeUs, bufferInfo.size, bufferInfo.flags, isKeyFrame));
-            // }
-            // if (trackIndex == videoTrackIndex && videoTrackIndex != -1 && isKeyFrame && logCount < 10) {
-            //     FLog.w(TAG, String.format("[VLC-VIDEO-KEY] Sample #%d: pts=%dus, size=%d, origFlags=0x%X - VIDEO KEYFRAME",
-            //         logCount, normalizedPresentationTimeUs, bufferInfo.size, bufferInfo.flags));
-            // }
-            
-            // Convert MediaCodec.BufferInfo to Media3 BufferInfo with normalized timestamp
+            long ptsUs = bufferInfo.presentationTimeUs;
+            if (ptsUs < 0) throw new IllegalArgumentException("Negative capture presentation timestamp");
             int flags = convertFlags(bufferInfo.flags, trackIndex);
             androidx.media3.muxer.BufferInfo media3BufferInfo =
-                new androidx.media3.muxer.BufferInfo(
-                    normalizedPresentationTimeUs,  // Use normalized timestamp
-                    bufferInfo.size,
-                    flags
-                );
+                    new androidx.media3.muxer.BufferInfo(ptsUs, bufferInfo.size, flags);
 
             // Position the buffer correctly for the muxer.
             // IMPORTANT: The caller (GLRecordingPipeline) pre-positions the buffer:
@@ -383,6 +336,11 @@ public class FragmentedMp4MuxerWrapper {
             }
             // Else: buffer is already correctly positioned by caller, use as-is
 
+            // Match Media3's initial video keyframe gate and exclude empty codec EOS samples.
+            if (bufferInfo.size > 0 && (trackIndex != videoTrackIndex
+                    || (flags & C.BUFFER_FLAG_KEY_FRAME) != 0)) {
+                firstTrackPtsUs.putIfAbsent(trackIndex + 1, ptsUs);
+            }
             muxer.writeSampleData(trackIndex, data, media3BufferInfo);
             } catch (MuxerException e) {
                 FLog.e(TAG, "Failed to write sample data", e);
@@ -465,6 +423,14 @@ public class FragmentedMp4MuxerWrapper {
      */
     /** Lets the pipeline record the output path even for fd-based constructions. */
     public void setOutputPath(String path) { this.outputPath = path; }
+
+    /** Earliest possible packet time in this output, on the common encoder clock. */
+    public void setFragmentLowerBoundUs(long earliestUs) {
+        synchronized (muxerLock) {
+            if (started || earliestUs < 0) throw new IllegalArgumentException("Invalid fragment clock lower bound");
+            fragmentLowerBoundUs = earliestUs;
+        }
+    }
 
     public void setOrientationHint(int degrees) {
         if (started) {
@@ -759,10 +725,10 @@ public class FragmentedMp4MuxerWrapper {
      */
     private static final class FragmentLayout {
         int audioCount, videoCount, audioOffset, videoOffset;
-        long audioEnd, videoEnd;
+        long audioEnd, videoEnd, endUs;
     }
 
-    private FragmentLayout parseFragmentForFinalization(byte[] data) throws IOException {
+    private FragmentLayout parseFragmentForFinalization(byte[] data, boolean applyTimeline) throws IOException {
         int moofSize = boxSize(data, 0, data.length);
         if (readIntBE(data, 4) != 0x6d6f6f66 || moofSize < 20) throw invalidFragment();
         int mdatSize = boxSize(data, moofSize, data.length);
@@ -775,7 +741,7 @@ public class FragmentedMp4MuxerWrapper {
         for (int pos = 8 + mfhdSize; pos < moofSize;) {
             int size = boxSize(data, pos, moofSize);
             if (readIntBE(data, pos + 4) == 0x74726166) {
-                parseTrackRun(data, pos + 8, pos + size, moofSize + 8, layout);
+                parseTrackRun(data, pos + 8, pos + size, moofSize + 8, layout, applyTimeline);
             }
             pos += size;
         }
@@ -795,16 +761,23 @@ public class FragmentedMp4MuxerWrapper {
     }
 
     private void parseTrackRun(byte[] data, int first, int end, int mdatPayload,
-                               FragmentLayout layout) throws IOException {
+                               FragmentLayout layout, boolean applyTimeline) throws IOException {
         int trackId = -1;
         int trun = -1;
         int trunSize = 0;
+        int tfdt = -1;
         for (int pos = first; pos < end;) {
             int size = boxSize(data, pos, end);
             int type = readIntBE(data, pos + 4);
             if (type == 0x74666864) { // tfhd
                 if (size < 16 || trackId != -1) throw invalidFragment();
                 trackId = readIntBE(data, pos + 12);
+            } else if (type == 0x74666474 && applyTimeline) { // tfdt
+                // The pinned Media3 writer emits 64-bit decode times.
+                if (size != 20 || tfdt != -1 || readIntBE(data, pos + 8) != 0x01000000) {
+                    throw invalidFragment();
+                }
+                tfdt = pos + 12;
             } else if (type == 0x7472756e) { // trun
                 if (size < 20 || trun != -1) throw invalidFragment();
                 trun = pos;
@@ -824,8 +797,10 @@ public class FragmentedMp4MuxerWrapper {
         int stride = flags == 0xf01 ? 16 : 12;
         if (20L + stride * (long) sampleCount != trunSize) throw invalidFragment();
         long sampleEnd = dataOffset;
+        long durationVu = 0;
         for (int index = 0, sample = trun + 20; index < sampleCount; index++, sample += stride) {
             int size = readIntBE(data, sample + 4);
+            if (applyTimeline) durationVu += Integer.toUnsignedLong(readIntBE(data, sample));
             if (size <= 0 || (sampleEnd += size) > data.length) throw invalidFragment();
         }
         if (videoTrackIndex >= 0 && trackId == videoTrackIndex + 1 && layout.videoCount == 0) {
@@ -838,6 +813,31 @@ public class FragmentedMp4MuxerWrapper {
             layout.audioEnd = sampleEnd;
         } else {
             throw invalidFragment();
+        }
+        if (applyTimeline) {
+            Long firstPtsUs = firstTrackPtsUs.get(trackId);
+            if (tfdt < 0 || firstPtsUs == null) throw invalidFragment();
+            if (fragmentOriginUs < 0) {
+                // If one codec hasn't produced a packet yet, freeze the caller's known lower
+                // bound. Do not infer a new origin later from out-of-order track delivery.
+                fragmentOriginUs = fragmentLowerBoundUs;
+                if (firstTrackPtsUs.size() == trackCount) {
+                    fragmentOriginUs = java.util.Collections.min(firstTrackPtsUs.values());
+                }
+            }
+            long offsetUs = firstPtsUs - fragmentOriginUs;
+            if (offsetUs < 0) throw new IOException("Sample predates the shared fragment clock");
+            // Same timebases as the pinned Media3 Track.videoUnitTimebase().
+            long timescale = trackId == audioTrackIndex + 1 ? 48_000L : 90_000L;
+            long offsetVu = (offsetUs / 1_000_000L) * timescale
+                    + (offsetUs % 1_000_000L) * timescale / 1_000_000L;
+            ByteBuffer fragment = ByteBuffer.wrap(data);
+            long startVu = Math.addExact(fragment.getLong(tfdt), offsetVu);
+            fragment.putLong(tfdt, startVu);
+            long endVu = Math.addExact(startVu, durationVu);
+            long endUs = Math.addExact(Math.multiplyExact(endVu / timescale, 1_000_000L),
+                    (endVu % timescale) * 1_000_000L / timescale);
+            layout.endUs = Math.max(layout.endUs, endUs);
         }
     }
 
@@ -951,6 +951,55 @@ public class FragmentedMp4MuxerWrapper {
         }
     }
 
+    private static void fixMovieDurationForTrackEdits(ByteBuffer moov) throws IOException {
+        int end = movieBoxEnd(moov, 0, moov.limit());
+        if (end != moov.limit() || moov.getInt(4) != 0x6d6f6f76) throw invalidFragment();
+        int mvhd = -1;
+        long maxDuration = 0;
+        for (int pos = 8; pos < end;) {
+            int next = movieBoxEnd(moov, pos, end);
+            int type = moov.getInt(pos + 4);
+            if (type == 0x6d766864) { // mvhd
+                if (next - pos < 28 || moov.get(pos + 8) != 0) throw invalidFragment();
+                mvhd = pos;
+            } else if (type == 0x7472616b) { // trak
+                int tkhd = -1;
+                long editDuration = 0;
+                for (int child = pos + 8; child < next;) {
+                    int childEnd = movieBoxEnd(moov, child, next);
+                    int childType = moov.getInt(child + 4);
+                    if (childType == 0x746b6864) { // tkhd
+                        if (childEnd - child < 32 || moov.get(child + 8) != 0) throw invalidFragment();
+                        tkhd = child;
+                    } else if (childType == 0x65647473) { // edts
+                        int elst = child + 8;
+                        int editEnd = movieBoxEnd(moov, elst, childEnd);
+                        if (moov.getInt(elst + 4) != 0x656c7374 || editEnd - elst < 16) throw invalidFragment();
+                        if (moov.getInt(elst + 12) == 2) {
+                            if (editEnd - elst < 56 || moov.get(elst + 8) != 1
+                                    || moov.getLong(elst + 24) != -1) throw invalidFragment();
+                            editDuration = Math.addExact(moov.getLong(elst + 16), moov.getLong(elst + 36));
+                        }
+                    }
+                    child = childEnd;
+                }
+                if (tkhd < 0) throw invalidFragment();
+                if (editDuration > 0) moov.putInt(tkhd + 28, (int) Math.min(editDuration, 0xffff_ffffL));
+                maxDuration = Math.max(maxDuration, Integer.toUnsignedLong(moov.getInt(tkhd + 28)));
+            }
+            pos = next;
+        }
+        if (mvhd < 0) throw invalidFragment();
+        moov.putInt(mvhd + 24, (int) maxDuration);
+    }
+
+    private static int movieBoxEnd(ByteBuffer data, int start, int limit) throws IOException {
+        if (start > limit - 8) throw invalidFragment();
+        int size = data.getInt(start);
+        if (size < 8 || size > limit - start) throw invalidFragment();
+        return start + size;
+    }
+
     /** Performs the moov-append + mdat-header patch on the given channel. */
     private void finalizeWithChannel(java.nio.channels.FileChannel ch) throws IOException {
         if (ch.size() < committedOutputEnd) throw new IOException("녹화 파일이 짧습니다.");
@@ -970,6 +1019,10 @@ public class FragmentedMp4MuxerWrapper {
             if (vcnt > 0 && voff > 0) { vOff.add(fragPos + voff); vCnt.add(vcnt); }
         }
         java.nio.ByteBuffer moov = muxer.buildFinalMoov(aOff, aCnt, vOff, vCnt);
+        if (firstTrackPtsUs.size() > 1) {
+            // The pinned writer encodes the empty edit but omits it from tkhd/mvhd durations.
+            fixMovieDurationForTrackEdits(moov.slice());
+        }
         long moovPos = committedOutputEnd;
         int moovSize = moov.remaining();
         // Replace the 16-byte free box with a 64-bit mdat header.
@@ -1196,7 +1249,8 @@ public class FragmentedMp4MuxerWrapper {
                     writeSegmentWithRecovery(data, true);
                 }
             } else {
-                // Media fragment (moof + mdat)
+                // Apply the same A/V start offset before publishing to HLS or disk.
+                FragmentLayout layout = parseFragmentForFinalization(data, true);
                 // Fragment info logged only at DEBUG level to avoid
                 // flooding logcat during long recordings.
                 
@@ -1212,12 +1266,12 @@ public class FragmentedMp4MuxerWrapper {
                 
                 // Write to file — per-fragment flush for SAF visibility.
                 if (shouldSaveToDisk && fileOutputStream != null) {
-                    writeSegmentWithRecovery(data, false);
+                    writeSegmentWithRecovery(data, layout);
                 }
                 
                 nextFragmentNumber++;
                 // Track cumulative duration for mvhd patch
-                cumulativeDurationUs += segment.durationMs * 1000L;
+                cumulativeDurationUs = Math.max(cumulativeDurationUs, layout.endUs);
             }
             } catch (Exception e) {
                 if (outputFailure == null) outputFailure = new IOException("조각 기록에 실패했습니다.", e);
@@ -1242,11 +1296,16 @@ public class FragmentedMp4MuxerWrapper {
         if (outputFailure != null) throw outputFailure;
         final FragmentLayout layout;
         try {
-            layout = isInit ? null : parseFragmentForFinalization(data);
+            layout = isInit ? null : parseFragmentForFinalization(data, false);
         } catch (IOException invalid) {
             outputFailure = invalid;
             throw invalid;
         }
+        writeSegmentWithRecovery(data, layout);
+    }
+
+    private void writeSegmentWithRecovery(byte[] data, FragmentLayout layout) throws IOException {
+        if (outputFailure != null) throw outputFailure;
         try {
             writeSegmentBytes(data, layout);
         } catch (IOException first) {

@@ -20,12 +20,15 @@ import androidx.documentfile.provider.DocumentFile;
 import com.fadcam.Constants;
 import com.fadcam.R;
 import com.fadcam.SharedPreferencesManager;
+import com.fadcam.utils.CopyIntegrity;
 import com.fadcam.utils.RecordingStoragePaths;
 import com.mikimn.droiduvc.StreamMode;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.security.DigestOutputStream;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -624,19 +627,87 @@ public class UsbCameraActivity extends AppCompatActivity implements TextureView.
         if(camera==null)throw new IOException("No Camera directory in selected tree");
         DocumentFile usb=RecordingStoragePaths.findOrCreateChildDirectory(camera,"USB",true);
         if(usb==null)throw new IOException("No USB directory in selected tree");
-        DocumentFile photo=usb.createFile("image/jpeg","USB_"+UUID.randomUUID()+".jpg");
+        Uri folder=usb.getUri();
+        Set<String> existingIds=listUsbPhotoDocumentIds(folder);
+        String filename="USB_"+UUID.randomUUID()+".jpg";
+        DocumentFile photo=usb.createFile("image/jpeg",filename);
         if(photo==null)throw new IOException("Cannot create JPEG document");
         Uri uri=photo.getUri();
+        // A broken provider may return an existing document from createDocument().
+        // Do not even open it for write unless its identity and unique name match this shutter.
+        if(!"content".equals(uri.getScheme())||!Objects.equals(folder.getAuthority(),uri.getAuthority())
+                ||!DocumentsContract.isTreeUri(uri)
+                ||!DocumentsContract.getTreeDocumentId(folder).equals(DocumentsContract.getTreeDocumentId(uri))
+                ||DocumentsContract.getDocumentId(folder).equals(DocumentsContract.getDocumentId(uri))
+                ||existingIds.contains(DocumentsContract.getDocumentId(uri))
+                ||!filename.equals(photo.getName())){
+            throw new IOException("Provider did not return a fresh JPEG document");
+        }
         try{
-            try(OutputStream output=getContentResolver().openOutputStream(uri,"w")){
-                if(output==null)throw new IOException("Cannot open JPEG document");
+            MessageDigest digest=CopyIntegrity.sha256();
+            OutputStream raw=getContentResolver().openOutputStream(uri,"w");
+            if(raw==null)throw new IOException("Cannot open JPEG document");
+            long bytes;
+            try(PhotoWriteDigest output=new PhotoWriteDigest(raw,digest)){
                 writePhotoJpeg(bitmap,output);
+                bytes=output.bytes;
+            }
+            // Read the exact URI again after close: neither close nor reported provider size
+            // proves that the bytes originally supplied by the encoder reached storage.
+            if(bytes==0||!CopyIntegrity.matches(getContentResolver().openInputStream(uri),bytes,digest.digest())){
+                throw new IOException("Stored USB JPEG does not match encoded bytes");
             }
             return uri;
         }catch(IOException|RuntimeException failure){
-            // The fresh, uniquely named destination is the only document eligible for cleanup.
-            try{photo.delete();}catch(RuntimeException cleanup){failure.addSuppressed(cleanup);}
+            boolean deleted=false;
+            try{deleted=photo.delete();}catch(RuntimeException cleanup){failure.addSuppressed(cleanup);}
+            if(!deleted)rememberIncompleteUsbPhoto(uri);
             throw failure;
+        }
+    }
+
+    private Set<String> listUsbPhotoDocumentIds(Uri folder)throws IOException{
+        Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(folder,DocumentsContract.getDocumentId(folder));
+        Set<String> result=new HashSet<>();
+        try(android.database.Cursor cursor=getContentResolver().query(children,
+                new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID},null,null,null)){
+            Bundle extras=cursor==null?null:cursor.getExtras();
+            if(cursor==null||(extras!=null&&(extras.getBoolean(DocumentsContract.EXTRA_LOADING)
+                    ||extras.containsKey(DocumentsContract.EXTRA_ERROR)))){
+                throw new IOException("USB photo directory is not fully listed");
+            }
+            while(cursor.moveToNext()){
+                String id=cursor.getString(0);
+                if(id==null)throw new IOException("USB photo document identity unavailable");
+                result.add(id);
+            }
+        }
+        return result;
+    }
+
+    private void rememberIncompleteUsbPhoto(Uri uri){
+        // A provider may deny deletion. Retain the exact URI for manual recovery;
+        // do not retry deletion automatically, as ownership could change.
+        SharedPreferences prefs=getSharedPreferences("usb_photo_recovery",MODE_PRIVATE);
+        synchronized(prefs){
+            Set<String> pending=new HashSet<>(prefs.getStringSet("pending_uris",Collections.emptySet()));
+            pending.add(uri.toString());
+            if(!prefs.edit().putStringSet("pending_uris",pending).commit()){
+                com.fadcam.FLog.w("UsbCameraActivity","Could not persist USB JPEG recovery URI: "+uri);
+            }
+        }
+    }
+
+    private static final class PhotoWriteDigest extends DigestOutputStream {
+        long bytes;
+        PhotoWriteDigest(OutputStream output,MessageDigest digest){super(output,digest);}
+        @Override public void write(int b)throws IOException{
+            super.write(b);
+            bytes++;
+        }
+        @Override public void write(byte[] data,int offset,int length)throws IOException{
+            super.write(data,offset,length);
+            bytes+=length;
         }
     }
 

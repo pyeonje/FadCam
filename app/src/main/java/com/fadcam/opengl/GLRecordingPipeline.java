@@ -200,6 +200,8 @@ public class GLRecordingPipeline {
     private int videoTrackIndex = -1; // Track index for video in the muxer
     private boolean audioEncoderStarted = false;
     private boolean audioRecordingEnabled = false;
+    // The deadline is a save failure, but a video-only file can still be recovered.
+    private boolean recoveringWithoutAudio = false;
     private volatile boolean audioThreadRunning = false;
     private Boolean audioEnabledForSession;
 
@@ -243,7 +245,11 @@ public class GLRecordingPipeline {
 
     // Pre-muxer video frame buffer: stores encoded video frames that arrive before the muxer
     // is started (while waiting for audio track to be registered). Flushed when muxer starts.
-    private static final int MAX_PRE_MUXER_BUFFER_FRAMES = 60; // ~2 seconds at 30fps
+    private static final long AUDIO_FORMAT_TIMEOUT_MS = 5_000L;
+    private static final int MAX_PRE_MUXER_VIDEO_BYTES = 32 * 1024 * 1024;
+    private static final int MAX_PRE_MUXER_AUDIO_SAMPLES = 512;
+    private int preMuxerVideoBytes;
+    private final java.util.List<PendingVideoFrame> preMuxerAudioBuffer = new java.util.ArrayList<>();
     private final java.util.List<PendingVideoFrame> preMuxerVideoFrameBuffer = new java.util.ArrayList<>();
 
     /** Holds a copy of an encoded video frame produced before the muxer was ready. */
@@ -813,35 +819,7 @@ public class GLRecordingPipeline {
                 // Mark as recording and set up audio first
                 isRecording = true;
                 setupAudio();
-                if (audioRecordingEnabled) {
-                    startAudioThread();
-                    // Give audio encoder time to initialize and produce output format
-                    // This is critical - the audio encoder needs data flowing through it
-                    // before INFO_OUTPUT_FORMAT_CHANGED is signaled
-                    try {
-                        Thread.sleep(150); // Slightly longer initial wait for audio thread to start
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                    
-                    // Aggressively drain audio encoder to get format early
-                    // The encoder needs some input before it produces output format
-                    // Try for up to 2 seconds (40 iterations * 50ms)
-                    for (int i = 0; i < 40 && audioTrackIndex == -1; i++) {
-                        drainAudioEncoder();
-                        if (audioTrackIndex != -1) {
-                            // audio setup log removed  " + (i + 1) + " drain attempts");
-                            break;
-                        }
-                        try {
-                            Thread.sleep(50);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                    }
-                    
-                }
+                if (audioRecordingEnabled) startAudioThread();
 
                 // Start/refresh low-frequency watermark updater (once per second).
                 ensureWatermarkUpdaterRunning();
@@ -852,8 +830,8 @@ public class GLRecordingPipeline {
                 // Start the drain loop on a dedicated thread — decoupled from GL rendering
                 // so slow muxer I/O never blocks the camera frame delivery pipeline.
                 startDrainLoop();
-                if (audioRecordingEnabled && audioTrackIndex == -1) {
-                    drainHandler.postDelayed(this::startMuxerWithoutLateAudio, 5000);
+                if (audioRecordingEnabled) {
+                    drainHandler.postDelayed(this::startMuxerWithoutLateAudio, AUDIO_FORMAT_TIMEOUT_MS);
                 }
             }
         } catch (Exception e) {
@@ -954,10 +932,7 @@ public class GLRecordingPipeline {
                 if (mediaMuxer != null && !muxerStarted && videoTrackIndex == -1) {
                     cachedVideoFormat = newFormat;
                     videoTrackIndex = mediaMuxer.addTrack(newFormat);
-                    if (!audioRecordingEnabled || audioTrackIndex != -1) {
-                        mediaMuxer.start();
-                        muxerStarted = true;
-                    }
+                    startMuxerWhenTracksReady();
                 }
             } else if (outputBufferIndex >= 0) {
                 ByteBuffer encodedData = videoEncoder.getOutputBuffer(outputBufferIndex);
@@ -980,6 +955,14 @@ public class GLRecordingPipeline {
                     }
                 }
 
+                if (encodedData != null && !muxerStarted && mediaMuxer != null && bufferInfo.size > 0
+                        && (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                    try {
+                        bufferPreMuxerVideo(encodedData, bufferInfo);
+                    } catch (RuntimeException failure) {
+                        recordFailure("녹화 종료 중 영상 샘플을 보존하지 못했습니다.", failure);
+                    }
+                }
                 videoEncoder.releaseOutputBuffer(outputBufferIndex, false);
 
                 // Check for EOS flag
@@ -1014,14 +997,10 @@ public class GLRecordingPipeline {
                 return false; // No buffer available, need to try again
             } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 MediaFormat newFormat = audioEncoder.getOutputFormat();
-                if (mediaMuxer != null && !muxerStarted && audioTrackIndex == -1) {
-                    cachedAudioFormat = newFormat;
+                if (mediaMuxer != null && !muxerStarted && !recoveringWithoutAudio && audioTrackIndex == -1) {
                     audioTrackIndex = mediaMuxer.addTrack(newFormat);
-                    if (videoTrackIndex != -1) {
-                        mediaMuxer.start();
-                        muxerStarted = true;
-                        flushPreMuxerVideoBuffer();
-                    }
+                    cachedAudioFormat = newFormat;
+                    startMuxerWhenTracksReady();
                 }
             } else if (outputBufferIndex >= 0) {
                 ByteBuffer encodedData = audioEncoder.getOutputBuffer(outputBufferIndex);
@@ -1416,8 +1395,10 @@ public class GLRecordingPipeline {
         // DO NOT start muxer here - wait for encoder formats to be available
         // This prevents the format change issue that causes muxer restarts
     muxerStarted = false;
-    // Clear any pre-muxer buffered frames from the previous segment
+    // Clear any pre-muxer buffered samples from the previous segment.
     preMuxerVideoFrameBuffer.clear();
+    preMuxerVideoBytes = 0;
+    preMuxerAudioBuffer.clear();
     // Reset per-segment state
     segmentBytesWritten = 0L;
     pendingRollover = false;
@@ -1460,14 +1441,40 @@ public class GLRecordingPipeline {
     }
 
     private void startMuxerWithoutLateAudio() {
-        if (isStopped || !isRecording || muxerStarted || videoTrackIndex == -1 || mediaMuxer == null) return;
-        try {
-            mediaMuxer.start();
-            muxerStarted = true;
-            flushPreMuxerVideoBuffer();
-        } catch (RuntimeException failure) {
-            FLog.e(TAG, "Failed to start muxer via audio timeout", failure);
+        if (isStopped || (!isRecording && !isPaused) || !audioRecordingEnabled || audioTrackIndex != -1) return;
+        recoverVideoWithoutAudio("오디오 형식이 제시간에 도착하지 않았습니다. 복구할 수 있는 영상은 보존했습니다.");
+    }
+
+    private void recoverVideoWithoutAudio(String reason) {
+        if (!recoveringWithoutAudio) {
+            recoveringWithoutAudio = true;
+            recordFailure(reason, null);
         }
+        try {
+            startMuxerWhenTracksReady();
+        } catch (RuntimeException failure) {
+            recordFailure("복구용 영상 파일을 시작하지 못했습니다.", failure);
+        }
+    }
+
+    private void startMuxerWhenTracksReady() {
+        if (mediaMuxer == null || muxerStarted || videoTrackIndex == -1
+                || (audioRecordingEnabled && !recoveringWithoutAudio && audioTrackIndex == -1)) return;
+        mediaMuxer.start();
+        muxerStarted = true;
+        flushPreMuxerVideoBuffer();
+        if (audioTrackIndex != -1) {
+            for (PendingVideoFrame sample : preMuxerAudioBuffer) {
+                try {
+                    writeSampleToMuxer(audioTrackIndex, sample.data, sample.info);
+                    audioSamplesWritten++;
+                    lastAudioPts = sample.info.presentationTimeUs;
+                } catch (RuntimeException failure) {
+                    // writeSampleToMuxer already recorded this failure; preserve later samples.
+                }
+            }
+        }
+        preMuxerAudioBuffer.clear();
     }
 
     private final class DrainRunnable implements Runnable {
@@ -1475,15 +1482,20 @@ public class GLRecordingPipeline {
         public void run() {
             if (isStopped) return;
             if (!isRecording) {
-                if (recordingFailure == null) drainHandler.postDelayed(this, 25);
+                // The timeout may record a failure while paused. Keep the drain
+                // owner alive so recovered video can still continue on resume.
+                if (recordingFailure == null || isPaused || recoveringWithoutAudio) {
+                    drainHandler.postDelayed(this, 25);
+                }
                 return;
             }
             // Drain audio FIRST — audio encoder has finite input buffers.
             // If the drain thread spends too much time on video (especially
             // at 4K+ max quality), audio output backs up, blocking EOS at
             // stop time and causing A/V timestamp drift (player stutter).
-            if (audioRecordingEnabled && audioEncoder != null && muxerStarted) {
-                drainAudioEncoderWithBudget(16L, false); // doubled budget for audio priority
+            if (audioRecordingEnabled && audioEncoder != null) {
+                // Format discovery must run even while the muxer is waiting for it.
+                drainAudioEncoderWithBudget(muxerStarted ? 16L : 4L, !muxerStarted);
             }
             drainEncoder();
             if (!isStopped && isRecording) shouldSplitSegment();
@@ -1603,19 +1615,7 @@ public class GLRecordingPipeline {
                     } else {
                         videoTrackIndex = mediaMuxer.addTrack(newFormat);
 
-                        if (!audioRecordingEnabled) {
-                            mediaMuxer.start();
-                            muxerStarted = true;
-                            flushPreMuxerVideoBuffer();
-                        } else {
-                            if (audioTrackIndex != -1) {
-                                mediaMuxer.start();
-                                muxerStarted = true;
-                                flushPreMuxerVideoBuffer();
-                            } else {
-                                FLog.d(TAG, "Video track added, waiting for audio track before starting muxer");
-                            }
-                        }
+                        startMuxerWhenTracksReady();
                     }
                 } else if (outputBufferIndex >= 0) {
                     ByteBuffer encodedData = videoEncoder.getOutputBuffer(outputBufferIndex);
@@ -1666,15 +1666,7 @@ public class GLRecordingPipeline {
                                     pendingAvcFormat = null;
                                     capturedAvcCsd0 = null;
                                     capturedAvcCsd1 = null;
-                                    if (!audioRecordingEnabled) {
-                                        mediaMuxer.start();
-                                        muxerStarted = true;
-                                        flushPreMuxerVideoBuffer();
-                                    } else if (audioTrackIndex != -1) {
-                                        mediaMuxer.start();
-                                        muxerStarted = true;
-                                        flushPreMuxerVideoBuffer();
-                                    }
+                                    startMuxerWhenTracksReady();
                                 }
                             } catch (Exception e) {
                                 FLog.e(TAG, "[AVC-CSD] Failed to capture csd from CODEC_CONFIG", e);
@@ -1711,15 +1703,7 @@ public class GLRecordingPipeline {
                                 capturedHevcCsd0 = null;
                                 capturedHevcCsd1 = null;
                                 // Start muxer if ready
-                                if (!audioRecordingEnabled) {
-                                    mediaMuxer.start();
-                                    muxerStarted = true;
-                                    flushPreMuxerVideoBuffer();
-                                } else if (audioTrackIndex != -1) {
-                                    mediaMuxer.start();
-                                    muxerStarted = true;
-                                    flushPreMuxerVideoBuffer();
-                                }
+                                startMuxerWhenTracksReady();
                             } catch (Exception e) {
                                 FLog.e(TAG, "[HEVC-CSD] Failed to capture csd-0 from CODEC_CONFIG", e);
                             }
@@ -1813,8 +1797,7 @@ public class GLRecordingPipeline {
                     } else if (bufferInfo.size > 0 && !muxerStarted) {
                         // Buffer the frame instead of dropping — will be flushed when muxer starts.
                         // Only buffer non-codec-config frames; discard codec config (not writeable to muxer after start).
-                        if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
-                                && preMuxerVideoFrameBuffer.size() < MAX_PRE_MUXER_BUFFER_FRAMES) {
+                        if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
                             try {
                                 // Emergency: if still waiting for AVC csd, extract SPS/PPS from the keyframe
                                 if (pendingAvcFormat != null && isKeyframe) {
@@ -1837,15 +1820,7 @@ public class GLRecordingPipeline {
                                         pendingAvcFormat = null;
                                         capturedAvcCsd0 = null;
                                         capturedAvcCsd1 = null;
-                                        if (!audioRecordingEnabled) {
-                                            mediaMuxer.start();
-                                            muxerStarted = true;
-                                            flushPreMuxerVideoBuffer();
-                                        } else if (audioTrackIndex != -1) {
-                                            mediaMuxer.start();
-                                            muxerStarted = true;
-                                            flushPreMuxerVideoBuffer();
-                                        }
+                                        startMuxerWhenTracksReady();
                                     } else {
                                         FLog.e(TAG, "[AVC-CSD] CRITICAL: Cannot extract SPS/PPS from keyframe — recording will fail");
                                     }
@@ -1861,15 +1836,7 @@ public class GLRecordingPipeline {
                                         pendingHevcFormat = null;
                                         capturedHevcCsd0 = null;
                                         capturedHevcCsd1 = null;
-                                        if (!audioRecordingEnabled) {
-                                            mediaMuxer.start();
-                                            muxerStarted = true;
-                                            flushPreMuxerVideoBuffer();
-                                        } else if (audioTrackIndex != -1) {
-                                            mediaMuxer.start();
-                                            muxerStarted = true;
-                                            flushPreMuxerVideoBuffer();
-                                        }
+                                        startMuxerWhenTracksReady();
                                     } else {
                                         FLog.e(TAG, "[HEVC-CSD] CRITICAL: Cannot extract csd-0 from keyframe — recording will fail");
                                     }
@@ -1884,21 +1851,13 @@ public class GLRecordingPipeline {
                                         segmentBytesWritten += bufferInfo.size;
                                         FLog.d(TAG, "[HEVC-CSD] Wrote extraction-source keyframe directly (pts=" + bufferInfo.presentationTimeUs + ")");
                                     } else {
-                                        ByteBuffer copy = ByteBuffer.allocateDirect(bufferInfo.size);
-                                        encodedData.position(bufferInfo.offset);
-                                        encodedData.limit(bufferInfo.offset + bufferInfo.size);
-                                        copy.put(encodedData);
-                                        copy.flip();
-                                        MediaCodec.BufferInfo infoCopy = new MediaCodec.BufferInfo();
-                                        infoCopy.set(0, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags);
-                                        preMuxerVideoFrameBuffer.add(new PendingVideoFrame(copy, infoCopy));
-                                        FLog.d(TAG, "Buffered pre-muxer video frame (total=" + preMuxerVideoFrameBuffer.size() + ", pts=" + bufferInfo.presentationTimeUs + ")");
+                                        bufferPreMuxerVideo(encodedData, bufferInfo);
                                     }
                                 } else {
                                     FLog.w(TAG, "Still waiting for codec csd (HEVC/AVC), frame not keyframe — dropping");
                                 }
                             } catch (Exception e) {
-                                FLog.w(TAG, "Failed to buffer pre-muxer frame, will be lost", e);
+                                recordFailure("오디오를 기다리는 동안 영상 샘플을 보존하지 못했습니다.", e);
                             }
                         }
                     }
@@ -1929,6 +1888,41 @@ public class GLRecordingPipeline {
         }
     }
 
+    private static PendingVideoFrame copyPendingSample(ByteBuffer source, MediaCodec.BufferInfo info) {
+        ByteBuffer slice = source.duplicate();
+        slice.position(info.offset);
+        slice.limit(info.offset + info.size);
+        ByteBuffer data = ByteBuffer.allocateDirect(info.size);
+        data.put(slice);
+        data.flip();
+        MediaCodec.BufferInfo copy = new MediaCodec.BufferInfo();
+        copy.set(0, info.size, info.presentationTimeUs, info.flags);
+        return new PendingVideoFrame(data, copy);
+    }
+
+    private void bufferPreMuxerVideo(ByteBuffer data, MediaCodec.BufferInfo info) {
+        long frameLimit = Math.max(60L, (long) videoFramerate * AUDIO_FORMAT_TIMEOUT_MS / 1_000 + 8);
+        if (preMuxerVideoFrameBuffer.size() >= frameLimit
+                || info.size > MAX_PRE_MUXER_VIDEO_BYTES - preMuxerVideoBytes) {
+            if (audioRecordingEnabled && audioTrackIndex == -1 && videoTrackIndex != -1) {
+                recoverVideoWithoutAudio("오디오를 기다리는 동안 영상 버퍼가 가득 찼습니다. 복구용 영상을 보존합니다.");
+                if (muxerStarted) {
+                    data.position(info.offset);
+                    data.limit(info.offset + info.size);
+                    writeSampleToMuxer(videoTrackIndex, data, info);
+                    videoSamplesWritten++;
+                    lastVideoPts = info.presentationTimeUs;
+                    segmentBytesWritten += info.size;
+                    return;
+                }
+            }
+            recordFailure("녹화 시작 전 영상 버퍼가 가득 찼습니다.", null);
+            return;
+        }
+        preMuxerVideoFrameBuffer.add(copyPendingSample(data, info));
+        preMuxerVideoBytes += info.size;
+    }
+
     /**
      * Writes all video frames buffered before the muxer was started (pre-muxer buffer)
      * to the muxer. Must be called immediately after {@code mediaMuxer.start()} while
@@ -1943,12 +1937,14 @@ public class GLRecordingPipeline {
                 writeSampleToMuxer(videoTrackIndex, frame.data, frame.info);
                 videoSamplesWritten++;
                 lastVideoPts = frame.info.presentationTimeUs;
+                segmentBytesWritten += frame.info.size;
             } catch (Exception e) {
                 FLog.w(TAG, "Error writing buffered pre-muxer video frame", e);
                                 recordFailure("인코딩한 샘플을 파일에 쓰지 못했습니다.", e);
             }
         }
         preMuxerVideoFrameBuffer.clear();
+        preMuxerVideoBytes = 0;
     }
 
     private boolean shouldSplitSegment() {
@@ -2037,8 +2033,10 @@ public class GLRecordingPipeline {
             }
 
             try {
-                // Create new muxer for the next segment
+                // Create a new muxer, but keep the capture clock across segments.
                 setupMuxer();
+                mediaMuxer.setFragmentLowerBoundUs(audioRecordingEnabled
+                        ? Math.min(lastAudioPts, lastVideoPts) : lastVideoPts);
 
                 // Re-add cached tracks because encoder will NOT emit format changed again
                 if (cachedVideoFormat != null) {
@@ -2053,37 +2051,19 @@ public class GLRecordingPipeline {
                     FLog.w(TAG, "Video format not cached; new segment will wait for format change (unlikely)");
                 }
 
-                if (audioRecordingEnabled) {
-                    if (cachedAudioFormat != null) {
+                if (audioRecordingEnabled && !recoveringWithoutAudio) {
+                    if (cachedAudioFormat == null) {
+                        recoverVideoWithoutAudio("새 녹화 파일에 필요한 오디오 형식이 없습니다.");
+                    } else {
                         try {
                             audioTrackIndex = mediaMuxer.addTrack(cachedAudioFormat);
-                            FLog.d(TAG, "Added cached audio track to new muxer. index=" + audioTrackIndex);
-                        } catch (Exception e) {
-                            FLog.e(TAG, "Failed adding cached audio track to new muxer", e);
-                            // Continue without audio for this segment
+                        } catch (RuntimeException error) {
+                            recordFailure("새 녹화 파일에 오디오 트랙을 만들지 못했습니다.", error);
+                            recoverVideoWithoutAudio("새 녹화 파일에 필요한 오디오 트랙이 없습니다.");
                         }
-                    } else {
-                        FLog.w(TAG, "Audio format not cached; audio may be missing in new segment");
                     }
                 }
-
-                // Start muxer if conditions met (mirror initial logic)
-                if (!audioRecordingEnabled) {
-                    if (videoTrackIndex != -1 && !muxerStarted) {
-                        mediaMuxer.start();
-                        muxerStarted = true;
-                        FLog.d(TAG, "Started new muxer (video-only) for segment " + segmentNumber);
-                    }
-                } else {
-                    if (videoTrackIndex != -1 && audioTrackIndex != -1 && !muxerStarted) {
-                        mediaMuxer.start();
-                        muxerStarted = true;
-                        FLog.d(TAG, "Started new muxer (audio+video) for segment " + segmentNumber);
-                    } else {
-                        FLog.d(TAG, "Deferred starting new muxer: videoTrackIndex=" + videoTrackIndex +
-                                ", audioTrackIndex=" + audioTrackIndex + ", muxerStarted=" + muxerStarted);
-                    }
-                }
+                startMuxerWhenTracksReady();
 
                 // Ask the GL loop for a frame ASYNCHRONOUSLY (never block the drain
                 // thread on the render): a synchronous renderFrame() here deadlocks
@@ -2469,6 +2449,11 @@ public class GLRecordingPipeline {
         // and we get "Handler sending message to a dead thread" errors
         // This is the production-grade EOS-based drain that waits for actual EOS flags
         emergencyDrainEncoders();
+        if (audioRecordingEnabled && audioTrackIndex == -1 && !recoveringWithoutAudio) {
+            recoverVideoWithoutAudio("녹화를 종료할 때까지 오디오 트랙을 만들지 못했습니다.");
+        } else if (audioRecordingEnabled && audioTrackIndex != -1 && audioSamplesWritten == 0) {
+            recordFailure("요청한 오디오 샘플을 저장하지 못했습니다.", null);
+        }
 
         stopRenderOwner();
 
@@ -3360,14 +3345,6 @@ public class GLRecordingPipeline {
         audioThread.start();
     }
 
-    /**
-     * Drains the audio encoder and writes samples to the muxer.
-     * Call this regularly from the render loop or a timer.
-     */
-    private void drainAudioEncoder() {
-        drainAudioEncoderWithBudget(Long.MAX_VALUE, false);
-    }
-
     private void drainAudioEncoderWithBudget(long maxDurationMs, boolean prioritizeVideoStartup) {
         if (!audioRecordingEnabled || audioEncoder == null || !audioEncoderStarted) {
             return;
@@ -3391,57 +3368,13 @@ public class GLRecordingPipeline {
                 if (outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     break;
                 } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    MediaFormat newFormat = audioEncoder.getOutputFormat();
-                    
-                    // Log CSD data for debugging audio issues
-                    try {
-                        if (newFormat.containsKey("csd-0")) {
-                            java.nio.ByteBuffer csd0 = newFormat.getByteBuffer("csd-0");
-                            if (csd0 != null) {
-                        } else {
-                                FLog.w(TAG, "Audio CSD-0 key present but null!");
-                            }
-                        } else {
-                            FLog.w(TAG, "Audio format MISSING csd-0 - this may cause playback issues!");
-                        }
-                    } catch (Exception e) {
-                        FLog.e(TAG, "Error checking audio CSD", e);
-                    }
-
-                    // Cache audio format for future segment rollovers
-                    cachedAudioFormat = newFormat;
-
-                    if (audioTrackIndex != -1) {
-                        FLog.w(TAG, "Audio format changed after track was added - continuing with existing track");
-                        // Don't restart or replace tracks - this causes duration issues
-                    } else if (muxerStarted) {
-                        FLog.w(TAG, "Audio format changed after muxer started - cannot add track now");
-                        // Don't try to add tracks after muxer has started
-                    } else {
-                        // Normal case - add audio track only if muxer hasn't started yet
-                        try {
-                            audioTrackIndex = mediaMuxer.addTrack(newFormat);
-
-                            // Check if we can start the muxer now (video track should already be added)
-                            if (!muxerStarted && videoTrackIndex != -1) {
-                                // Both tracks are ready - start muxer
-                                mediaMuxer.start();
-                                muxerStarted = true;
-                                flushPreMuxerVideoBuffer();
-                            } else if (!muxerStarted) {
-                            }
-                        } catch (Exception e) {
-                            FLog.e(TAG, "Failed to add audio track to muxer", e);
-                        }
+                    if (!recoveringWithoutAudio && !muxerStarted && audioTrackIndex == -1) {
+                        MediaFormat format = audioEncoder.getOutputFormat();
+                        audioTrackIndex = mediaMuxer.addTrack(format);
+                        cachedAudioFormat = format;
+                        startMuxerWhenTracksReady();
                     }
                 } else if (outputBufferIndex >= 0) {
-                    if (prioritizeVideoStartup && !muxerStarted && audioTrackIndex != -1 && bufferInfo.size > 0) {
-                        // Leave queued encoded audio in the codec until the first video frame has
-                        // started the muxer. Releasing all of it here causes a 200-300ms startup
-                        // stall before the first video frame is rendered.
-                        break;
-                    }
-
                     ByteBuffer encodedData = audioEncoder.getOutputBuffer(outputBufferIndex);
                     if (encodedData == null) {
                         FLog.e(TAG, "audioEncoderOutputBuffer " + outputBufferIndex + " was null");
@@ -3488,13 +3421,20 @@ public class GLRecordingPipeline {
                                 // Continue processing other frames
                             }
                         }
-                    } else if (bufferInfo.size > 0 && !muxerStarted) {
-                        FLog.d(TAG, "Dropping audio frame because muxer isn't started yet");
-                    } else if (bufferInfo.size > 0 && audioTrackIndex == -1) {
-                        FLog.d(TAG, "Dropping audio frame because audio track is not added yet");
+                    } else if (bufferInfo.size > 0 && !muxerStarted && !recoveringWithoutAudio) {
+                        if (preMuxerAudioBuffer.size() >= MAX_PRE_MUXER_AUDIO_SAMPLES) {
+                            recordFailure("녹화 시작 전 오디오 버퍼가 가득 찼습니다.", null);
+                        } else {
+                            try {
+                                preMuxerAudioBuffer.add(copyPendingSample(encodedData, bufferInfo));
+                            } catch (RuntimeException error) {
+                                recordFailure("녹화 시작 전 오디오 샘플을 보존하지 못했습니다.", error);
+                            }
+                        }
                     }
 
                     audioEncoder.releaseOutputBuffer(outputBufferIndex, false);
+                    if (prioritizeVideoStartup && !muxerStarted) break;
                     if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                         FLog.d(TAG, "End of stream reached in audio encoder");
                         break;

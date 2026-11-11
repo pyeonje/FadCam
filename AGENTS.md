@@ -60,47 +60,49 @@
 
 ### 7. Device Test Playbook — record, pull, verify (FadCam)
 
-Use this exact flow when testing recordings on a connected phone. Do NOT improvise or
-re-invent these steps.
+Do not install or launch an app, connect test hardware, or record unless the current
+task specifically authorizes that action. Use dedicated QA storage and non-user
+test content.
 
-**Install** (always via gradle — never `adb install` the APK manually):
-```bash
-./gradlew :app:installDefaultDebug
-```
+**Install (when authorized):** select the intended phone with `ANDROID_SERIAL`.
+Use `gradlew.bat :app:installDefaultDebug` on Windows (or `./gradlew` on other
+hosts). Keep the Gradle install restriction `--user 0` and verify the debug
+package for Android user 0. Do not install in other profiles, including Samsung
+Dual App (user 95). Debug package: `com.pyeonje.fadcam.beta`; component names
+use the Java namespace `com.fadcam`. Never record using the stable package.
 
-**Package names** (CRITICAL — debug has `applicationIdSuffix = ".beta"`):
-- App package: `com.pyeonje.fadcam.beta` (stable release is `com.pyeonje.fadcam` — never record into it)
-- Manifest classes resolve against the *namespace* `com.fadcam`, NOT the app id.
-  Relative names (`com.pyeonje.fadcam.beta/.RecordingStartActivity`) FAIL with "does not exist".
-  Always use the full component: `com.pyeonje.fadcam.beta/com.fadcam.RecordingStartActivity`.
+**Record (when separately authorized):**
 
-**Record** (start → wait → stop):
-```bash
-adb -s <SERIAL> shell am start -n com.pyeonje.fadcam.beta/com.fadcam.RecordingStartActivity
-sleep 15   # recording duration
-adb -s <SERIAL> shell am start -n com.pyeonje.fadcam.beta/com.fadcam.RecordingStopActivity
-```
+1. Generate a unique QA session ID (for example a UUID). Create and select a
+   dedicated empty SAF tree for that ID. Record the previous storage setting so
+   it can be restored. Note the phone serial, user 0, test case, and selected tree URI.
+2. Use the saved-settings launcher
+   `com.pyeonje.fadcam.beta/com.fadcam.PersonalRecordingStartActivity` or
+   the debug app UI, then stop that recording with the app UI or its debug stop
+   component `com.pyeonje.fadcam.beta/com.fadcam.RecordingStopActivity`.
+3. Record the exact output URI for each new segment or photo using the app or
+   selected document provider. Confirm it belongs to the recorded QA tree and
+   session. Record the exact file path too if the provider exposes it. If the
+   output cannot be uniquely identified, stop without copying or deleting it.
 
-**Find the file** (app saves to a custom SAF download folder; the path may be
-double-prefixed e.g. `Download/FadCam/Camera/Back/Camera/Back/` — do not hardcode it):
-```bash
-adb -s <SERIAL> shell "find /storage/emulated/0/Download /storage/emulated/0/Android/data/com.pyeonje.fadcam.beta -name '*.mp4' -mmin -5 2>/dev/null"
-adb -s <SERIAL> pull "<PATH>" /tmp/fadcam_session/out/
-```
+**Copy and verify:** export only the recorded URI through the document provider,
+or use `adb -s <SERIAL> pull "<EXACT_QA_FILE_PATH>" "<LOCAL_QA_SESSION_DIR>"`
+when that exact path is known. Keep device originals after pull. On the local
+copy:
 
-**Verify the recording** (always — this catches the stsz/trun mismatch class of bugs):
-1. `ffmpeg -v error -i file.mp4 -f null -` → must exit 0, no "Invalid NAL unit size"
-2. `ffprobe -v error -show_streams -show_format file.mp4` → duration must NOT be `-1ms`
-3. Box-walk with Python: appended `moov` stsz entries must EXACTLY equal the concatenated
-   fragment `trun` sample sizes for BOTH tracks (0 mismatches = PASS). trun flag bits:
-   `0x001`=data_offset, `0x100`=duration, `0x200`=size, `0x400`=flags; media3 interleaves
-   per-sample `[duration, size, flags]`, NOT grouped arrays.
+1. Run `ffmpeg -v error -i file.mp4 -f null -`; check that decoding exits 0.
+2. Run `ffprobe -v error -show_streams -show_format file.mp4`; verify the expected
+   audio policy, duration and start times. For A/V QA use a visible and audible
+   reference event and compare the measured delay in both track start orders.
+3. Box-walk the appended `moov`: the `stsz` entries must match concatenated
+   `trun` sample sizes in each track. Relevant `trun` flags: `0x001` data offset,
+   `0x100` duration, `0x200` size, `0x400` flags; values are interleaved per sample.
 
-**Cleanup** (after every test — never leave artifacts):
-```bash
-adb -s <SERIAL> shell rm -f "<PULLED_PATH>"
-rm -rf /tmp/fadcam_session
-```
+**Cleanup:** never delete existing device media. If device cleanup is requested,
+obtain separate approval and act on only the exact recorded QA output URI (or
+verified exact QA path). Do not select targets by timestamps, wildcards, or
+recursive directory traversal. Leave the output in place if identity is uncertain.
+Restore the previous storage setting if the approved QA procedure changed it.
 
 ## Core Principles (legacy)
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
