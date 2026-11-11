@@ -247,7 +247,8 @@ public class PersonalHomeFragment extends Fragment {
         recentMedia=new RecentMediaLauncher(this,view.findViewById(R.id.personal_home_videos));
         view.findViewById(R.id.personal_home_videos).setOnClickListener(v -> {
             if(RecordingService.isRecordingFinalizing() || "STOP".equals(pendingAction))return;
-            if(state==RecordingState.IN_PROGRESS || state==RecordingState.PAUSED) {
+            if(state==RecordingState.PAUSED) return;
+            if(state==RecordingState.IN_PROGRESS) {
                 Class<?> owner=DualCameraRecordingService.hasActiveSession()?DualCameraRecordingService.class:RecordingService.class;
                 requireContext().startService(new Intent(requireContext(),owner).setAction(Constants.INTENT_ACTION_CAPTURE_PHOTO));
             } else if(recentMedia!=null)recentMedia.open();
@@ -394,10 +395,7 @@ public class PersonalHomeFragment extends Fragment {
     }
 
     private boolean hasRecordingPermissions() {
-        Context context = getContext();
-        return context != null
-                && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-                && (!prefs.isRecordAudioEnabled() || ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED);
+        return com.fadcam.utils.RecordingPermissions.canRecord(getContext(), prefs.isRecordAudioEnabled());
     }
 
     private void completeSetup() {
@@ -610,8 +608,9 @@ public class PersonalHomeFragment extends Fragment {
         recentButton.setPadding(0,0,0,0);
         recentButton.setStrokeWidth(recordingControls?0:geometry.px(1));
         recentButton.setStrokeColor(android.content.res.ColorStateList.valueOf(0x40FFFFFF));
-        recentButton.setContentDescription(getString(recordingControls?R.string.shortcut_take_photo:R.string.personal_home_videos));
-        recentButton.setEnabled(!recordingControls || settled && (state==RecordingState.IN_PROGRESS || state==RecordingState.PAUSED));
+        recentButton.setContentDescription(getString(state==RecordingState.PAUSED ? R.string.photo_capture_paused
+                : recordingControls ? R.string.shortcut_take_photo : R.string.personal_home_videos));
+        recentButton.setEnabled(!recordingControls || settled && state==RecordingState.IN_PROGRESS);
         if(recordingControls) {
             recentButton.setIconResource(R.drawable.personal_camera_snapshot);recentButton.setIconSize(geometry.px(106));
             recentButton.setIconTint(android.content.res.ColorStateList.valueOf(android.graphics.Color.WHITE));

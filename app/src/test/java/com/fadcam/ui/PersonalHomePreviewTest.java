@@ -1199,7 +1199,10 @@ public class PersonalHomePreviewTest {
         List<Intent> actions=drainServices();assertEquals(1,actions.size());assertEquals(Constants.INTENT_ACTION_CAPTURE_PHOTO,actions.get(0).getAction());
         assertEquals(RecordingState.IN_PROGRESS,RecordingService.getSessionState());
         samsungState(RecordingState.PAUSED,1L,100L,0L);drainServices();button.performClick();
-        actions=drainServices();assertEquals(1,actions.size());assertEquals(Constants.INTENT_ACTION_CAPTURE_PHOTO,actions.get(0).getAction());assertEquals(RecordingState.PAUSED,RecordingService.getSessionState());
+        assertFalse(button.isEnabled());
+        assertEquals(fragment.getString(R.string.photo_capture_paused), button.getContentDescription());
+        assertTrue(drainServices().isEmpty());
+        assertEquals(RecordingState.PAUSED,RecordingService.getSessionState());
     }
 
     @Test public void samsungFinalizingTimelineSurvivesUnknownCallbackAndNewUiInstance() {

@@ -12,4 +12,9 @@
     <string name="gallery_yesterday">어제</string>
     <string name="gallery_other">기타</string>
     <string name="gallery_file_actions">파일 옵션</string>
+    <string name="gallery_mini_apps">미니 앱</string>
+    <plurals name="gallery_selected_count">
+        <item quantity="one">%d개 선택됨</item>
+        <item quantity="other">%d개 선택됨</item>
+    </plurals>
 </resources>

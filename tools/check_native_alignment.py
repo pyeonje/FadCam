@@ -40,8 +40,25 @@ def inspect_apk(path):
     return report
 
 
+def personal_apk_passes(results):
+    names = [r["library"] for r in results]
+    return (
+        "lib/arm64-v8a/libdroiduvc.so" in names
+        and len(names) == len(set(names))
+        and all(
+            len(r["library"].split("/")) == 3
+            and r["library"].startswith("lib/arm64-v8a/")
+            and r["elf_16kb"] and r["zip_16kb"]
+            for r in results
+        )
+    )
+
+
 if __name__ == "__main__":
     results = inspect_apk(Path(sys.argv[1]))
     print(json.dumps(results, indent=2))
     print(f"Checked {len(results)} native libraries; incompatible: {sum(not (r['elf_16kb'] and r['zip_16kb']) for r in results)}")
-    sys.exit(0 if all(r["elf_16kb"] and r["zip_16kb"] for r in results) else 1)
+    passed = personal_apk_passes(results)
+    if not passed:
+        print("arm64-v8a 필수 라이브러리 또는 16KiB 정렬 검증에 실패했습니다.", file=sys.stderr)
+    sys.exit(0 if passed else 1)

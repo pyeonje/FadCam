@@ -173,7 +173,6 @@ public class GLWatermarkRenderer {
     private final float[] latestTexMatrix = new float[16];
     private final float[] pipLatestTexMatrix = new float[16]; // Saved PiP matrix for full-screen draw when swapped
     private volatile boolean hasLatestTexMatrix = false;
-    private volatile boolean suppressWatermarkForSnapshot = false;
 
     // Watermark rendering (simplified)
     private int simpleWatermarkProgram;
@@ -430,15 +429,6 @@ public class GLWatermarkRenderer {
     }
 
     /**
-     * Renders to encoder surface but does not block waiting for a brand-new frame.
-     * Useful for snapshot capture during preview-only mode where preview loop may
-     * have already consumed the latest frame.
-     */
-    public void renderToEncoderAllowStaleFrame() {
-        renderToEncoderInternal(true);
-    }
-
-    /**
      * Consumes the latest frame from the SurfaceTexture without rendering it
      * to the encoder.  This MUST be called from the GL thread (the same thread
      * that owns the EGL context) whenever a new frame is signalled via
@@ -470,10 +460,6 @@ public class GLWatermarkRenderer {
                 FLog.w(TAG, "consumeLatestFrame failed", e);
             }
         }
-    }
-
-    public void setSuppressWatermarkForSnapshot(boolean suppress) {
-        suppressWatermarkForSnapshot = suppress;
     }
 
     private void renderToEncoderInternal(boolean allowStaleFrame) {
@@ -683,68 +669,8 @@ public class GLWatermarkRenderer {
                 // Continue anyway
             }
 
-            // Determine correct texture matrix based on orientation
-            boolean isLandscape = false;
-            if (userOrientationSetting != null) {
-                isLandscape = "landscape".equalsIgnoreCase(userOrientationSetting);
-            } else {
-                isLandscape = (deviceOrientation == 1 || deviceOrientation == 3);
-            }
-
-            float[] encoderTexMatrix;
-            if (isLandscape) {
-                // Apply vertical flip for landscape only
-                float[] fixedTexMatrix = new float[16];
-                Matrix.setIdentityM(fixedTexMatrix, 0);
-                Matrix.scaleM(fixedTexMatrix, 0, 1f, -1f, 1f);
-                Matrix.translateM(fixedTexMatrix, 0, 0f, -1f, 0f);
-                encoderTexMatrix = fixedTexMatrix;
-            } else {
-                // Portrait: use original texMatrix
-                encoderTexMatrix = texMatrix;
-            }
-            float[] encoderCameraMvp = recordingMvpMatrix;
-            if (isFullscreenCameraFront() && frontVideoMirrorEnabled) {
-                encoderTexMatrix = applyHorizontalTexFlip(encoderTexMatrix);
-            }
-
-            // Draw to encoder
             try {
-                // Always explicitly bind the OES texture before drawing.
-                // After EGL surface switches (renderToPreview ↔ renderToEncoder) or any
-                // rare context state reset, the GL_TEXTURE_EXTERNAL_OES binding in GL state
-                // may have been cleared. Re-binding here is cheap (just a GL state write)
-                // and eliminates the "No external texture bound" condition entirely.
-                if (oesTextureId != 0) {
-                    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId);
-                }
-                // Full-screen draw — always uses oesTextureId (which points to the correct
-                // camera after any swap). When swapped, use pipLatestTexMatrix since the
-                // texture data comes from the PiP camera but encoderTexMatrix is from primary.
-                // Apply mirror flip if the front camera's texture is being shown fullscreen.
-                float[] fsTexMatrix = camerasSwapped ? pipLatestTexMatrix : encoderTexMatrix;
-                // pipLatestTexMatrix is raw from pipSurfaceTexture — apply flip if fullscreen camera is front
-                if (camerasSwapped && isFullscreenCameraFront() && frontVideoMirrorEnabled) {
-                    fsTexMatrix = applyHorizontalTexFlip(fsTexMatrix);
-                }
-                if (mFullFrameBlit != null) {
-                    if (!camerasSwapped) {
-                        drawOESTexture(encoderCameraMvp, fsTexMatrix);
-                    } else {
-                        drawOESTextureWithId(oesTextureId, encoderCameraMvp, fsTexMatrix);
-                    }
-                } else {
-                    drawWithFallbackMethodId(oesTextureId, encoderCameraMvp, fsTexMatrix);
-                }
-
-                // Draw PiP overlay (if dual camera mode is active)
-                // Use identity MVP for PiP so rotation doesn't distort the PiP rectangle.
-                // The PiP geometry is computed in post-rotation NDC space.
-                if (pipEnabled) {
-                    updatePipTexture();
-                    drawPipOverlay(pipMvpMatrix); // identity, not recordingMvpMatrix
-                }
-
+                drawRecordingCameraLayer(texMatrix, true);
                 drawWatermark();
 
                 // Swap buffers to complete the frame
@@ -1890,9 +1816,6 @@ public class GLWatermarkRenderer {
     }
 
     private void drawWatermark() {
-        if (suppressWatermarkForSnapshot) {
-            return;
-        }
         if (watermarkText == null || watermarkText.isEmpty()) {
             // Do not draw any watermark if text is empty (no watermark option)
             return;
@@ -2493,6 +2416,69 @@ public class GLWatermarkRenderer {
         updateMatrices();
     }
 
+    /** Draws camera and optional PiP only, without presentation timestamps, swaps or watermark. */
+    private void drawRecordingCameraLayer(float[] texMatrix, boolean updatePip) {
+        // Determine correct texture matrix based on orientation
+        boolean isLandscape = false;
+        if (userOrientationSetting != null) {
+            isLandscape = "landscape".equalsIgnoreCase(userOrientationSetting);
+        } else {
+            isLandscape = (deviceOrientation == 1 || deviceOrientation == 3);
+        }
+
+        float[] encoderTexMatrix;
+        if (isLandscape) {
+            // Apply vertical flip for landscape only
+            float[] fixedTexMatrix = new float[16];
+            Matrix.setIdentityM(fixedTexMatrix, 0);
+            Matrix.scaleM(fixedTexMatrix, 0, 1f, -1f, 1f);
+            Matrix.translateM(fixedTexMatrix, 0, 0f, -1f, 0f);
+            encoderTexMatrix = fixedTexMatrix;
+        } else {
+            // Portrait: use original texMatrix
+            encoderTexMatrix = texMatrix;
+        }
+        float[] encoderCameraMvp = recordingMvpMatrix;
+        if (isFullscreenCameraFront() && frontVideoMirrorEnabled) {
+            encoderTexMatrix = applyHorizontalTexFlip(encoderTexMatrix);
+        }
+
+            // Always explicitly bind the OES texture before drawing.
+            // After EGL surface switches (renderToPreview ↔ renderToEncoder) or any
+            // rare context state reset, the GL_TEXTURE_EXTERNAL_OES binding in GL state
+            // may have been cleared. Re-binding here is cheap (just a GL state write)
+            // and eliminates the "No external texture bound" condition entirely.
+            if (oesTextureId != 0) {
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId);
+            }
+            // Full-screen draw — always uses oesTextureId (which points to the correct
+            // camera after any swap). When swapped, use pipLatestTexMatrix since the
+            // texture data comes from the PiP camera but encoderTexMatrix is from primary.
+            // Apply mirror flip if the front camera's texture is being shown fullscreen.
+            float[] fsTexMatrix = camerasSwapped ? pipLatestTexMatrix : encoderTexMatrix;
+            // pipLatestTexMatrix is raw from pipSurfaceTexture — apply flip if fullscreen camera is front
+            if (camerasSwapped && isFullscreenCameraFront() && frontVideoMirrorEnabled) {
+                fsTexMatrix = applyHorizontalTexFlip(fsTexMatrix);
+            }
+            if (mFullFrameBlit != null) {
+                if (!camerasSwapped) {
+                    drawOESTexture(encoderCameraMvp, fsTexMatrix);
+                } else {
+                    drawOESTextureWithId(oesTextureId, encoderCameraMvp, fsTexMatrix);
+                }
+            } else {
+                drawWithFallbackMethodId(oesTextureId, encoderCameraMvp, fsTexMatrix);
+            }
+
+            // Draw PiP overlay (if dual camera mode is active)
+            // Use identity MVP for PiP so rotation doesn't distort the PiP rectangle.
+            // The PiP geometry is computed in post-rotation NDC space.
+            if (pipEnabled) {
+                if (updatePip) updatePipTexture();
+                drawPipOverlay(pipMvpMatrix); // identity, not recordingMvpMatrix
+            }
+    }
+
     /** Called only by the idle pipeline on its GL thread; encoder dimensions stay fixed. */
     public void setPreviewOnlyDisplay(int rotation, int width, int height) {
         boolean landscape = rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270;
@@ -2519,38 +2505,102 @@ public class GLWatermarkRenderer {
         this.encoderHeight = height;
     }
 
+    /** Called on the render thread. Uses the already-latched camera image without consuming a frame. */
     @Nullable
-    public Bitmap captureEncoderFrameBitmap() {
+    public Bitmap capturePhotoFrameOffscreen() {
         synchronized (renderLock) {
-            if (!initialized || eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) {
-                return null;
-            }
-            if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
-                return null;
-            }
+            if (!initialized || released || !hasLatestTexMatrix || oesTextureId == 0
+                    || eglContext == EGL14.EGL_NO_CONTEXT
+                    || !eglContext.equals(EGL14.eglGetCurrentContext())) return null;
             int width = encoderWidth > 0 ? encoderWidth : videoWidth;
             int height = encoderHeight > 0 ? encoderHeight : videoHeight;
-            if (width <= 0 || height <= 0) {
-                return null;
-            }
+            int maxTexture = glInteger(GLES20.GL_MAX_TEXTURE_SIZE);
+            if (width <= 0 || height <= 0 || width > maxTexture || height > maxTexture
+                    || (long) width * height > Integer.MAX_VALUE / 4L) return null;
 
-            java.nio.IntBuffer ib = java.nio.IntBuffer.allocate(width * height);
-            GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ib);
-
-            int[] src = ib.array();
-            int[] dst = new int[src.length];
-            for (int y = 0; y < height; y++) {
-                int srcOffset = y * width;
-                int dstOffset = (height - y - 1) * width;
-                for (int x = 0; x < width; x++) {
-                    int p = src[srcOffset + x];
-                    int r = (p >> 16) & 0xff;
-                    int b = p & 0xff;
-                    dst[dstOffset + x] = (p & 0xff00ff00) | (b << 16) | r;
+            final int framebuffer = glInteger(GLES20.GL_FRAMEBUFFER_BINDING);
+            final int program = glInteger(GLES20.GL_CURRENT_PROGRAM);
+            final int previousTextureUnit = glInteger(GLES20.GL_ACTIVE_TEXTURE);
+            final int[] viewport = new int[4];
+            final int[] mask = new int[4];
+            final float[] clearColor = new float[4];
+            GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, viewport, 0);
+            GLES20.glGetIntegerv(GLES20.GL_COLOR_WRITEMASK, mask, 0);
+            GLES20.glGetFloatv(GLES20.GL_COLOR_CLEAR_VALUE, clearColor, 0);
+            boolean blend = GLES20.glIsEnabled(GLES20.GL_BLEND);
+            boolean scissor = GLES20.glIsEnabled(GLES20.GL_SCISSOR_TEST);
+            int blendSrcRgb = glInteger(GLES20.GL_BLEND_SRC_RGB);
+            int blendDstRgb = glInteger(GLES20.GL_BLEND_DST_RGB);
+            int blendSrcAlpha = glInteger(GLES20.GL_BLEND_SRC_ALPHA);
+            int blendDstAlpha = glInteger(GLES20.GL_BLEND_DST_ALPHA);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            int texture2d = glInteger(GLES20.GL_TEXTURE_BINDING_2D);
+            int externalTexture = glInteger(GLES11Ext.GL_TEXTURE_BINDING_EXTERNAL_OES);
+            final int[] photoFbo = new int[1];
+            final int[] photoTexture = new int[1];
+            try {
+                GLES20.glGenFramebuffers(1, photoFbo, 0);
+                GLES20.glGenTextures(1, photoTexture, 0);
+                if (photoFbo[0] == 0 || photoTexture[0] == 0) return null;
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, photoTexture[0]);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                        width, height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, photoFbo[0]);
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                        GLES20.GL_TEXTURE_2D, photoTexture[0], 0);
+                if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+                        != GLES20.GL_FRAMEBUFFER_COMPLETE) return null;
+                GLES20.glViewport(0, 0, width, height);
+                GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+                GLES20.glDisable(GLES20.GL_BLEND);
+                GLES20.glColorMask(true, true, true, true);
+                GLES20.glClearColor(0f, 0f, 0f, 1f);
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+                drawRecordingCameraLayer(latestTexMatrix, false);
+                ByteBuffer rgba = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder());
+                GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, rgba);
+                if (GLES20.glGetError() != GLES20.GL_NO_ERROR) return null;
+                int[] pixels = new int[width * height];
+                for (int y = 0; y < height; y++) {
+                    int destination = (height - y - 1) * width;
+                    for (int x = 0; x < width; x++) {
+                        int source = (y * width + x) * 4;
+                        pixels[destination + x] = ((rgba.get(source + 3) & 0xff) << 24)
+                                | ((rgba.get(source) & 0xff) << 16)
+                                | ((rgba.get(source + 1) & 0xff) << 8) | (rgba.get(source + 2) & 0xff);
+                    }
                 }
+                return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888);
+            } catch (OutOfMemoryError error) {
+                FLog.w(TAG, "사진을 처리할 메모리가 부족합니다.", error);
+                return null;
+            } finally {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
+                GLES20.glDeleteFramebuffers(1, photoFbo, 0);
+                GLES20.glDeleteTextures(1, photoTexture, 0);
+                GLES20.glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+                GLES20.glColorMask(mask[0] != 0, mask[1] != 0, mask[2] != 0, mask[3] != 0);
+                GLES20.glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+                GLES20.glBlendFuncSeparate(blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha);
+                if (blend) GLES20.glEnable(GLES20.GL_BLEND); else GLES20.glDisable(GLES20.GL_BLEND);
+                if (scissor) GLES20.glEnable(GLES20.GL_SCISSOR_TEST); else GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+                GLES20.glUseProgram(program);
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture2d);
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTexture);
+                GLES20.glActiveTexture(previousTextureUnit);
             }
-            return Bitmap.createBitmap(dst, width, height, Bitmap.Config.ARGB_8888);
         }
+    }
+
+    private static int glInteger(int key) {
+        int[] value = new int[1];
+        GLES20.glGetIntegerv(key, value, 0);
+        return value[0];
     }
 
     @Nullable

@@ -30,23 +30,7 @@ public class VideoSessionCache {
     
     // Disk cache file names
     private static final String CACHE_FILE_NAME = "video_cache.dat";
-    private static final String THUMBNAIL_CACHE_DIR = "video_thumbnails";
-    
-    // In-memory thumbnail cache (bounded LRU to prevent OOM)
-    private static final int MAX_THUMBNAIL_CACHE_BYTES = 20 * 1024 * 1024; // 20MB
-    private static android.util.LruCache<String, byte[]> sThumbnailCache;
 
-    private static synchronized android.util.LruCache<String, byte[]> getThumbnailCache() {
-        if (sThumbnailCache == null) {
-            sThumbnailCache = new android.util.LruCache<String, byte[]>(MAX_THUMBNAIL_CACHE_BYTES) {
-                @Override
-                protected int sizeOf(@NonNull String key, @NonNull byte[] thumbnailData) {
-                    return thumbnailData.length;
-                }
-            };
-        }
-        return sThumbnailCache;
-    }
     
     // Session-level cache shared across all fragments
     private static List<VideoItem> sSessionCachedVideos = null;
@@ -356,7 +340,6 @@ public class VideoSessionCache {
         sSessionCachedVideos = null;
         sSessionCacheTimestamp = 0;
         sForceRefreshOnNextAccess = false;
-        clearThumbnailCache();
     }
     
     /**
@@ -440,103 +423,4 @@ public class VideoSessionCache {
         }
     }
     
-    // -------------- Thumbnail Caching Methods --------------
-    
-    /**
-     * Caches a thumbnail for a video URI
-     */
-    public static void cacheThumbnail(String uriString, byte[] thumbnailData) {
-        if (uriString == null || thumbnailData == null) return;
-        
-        getThumbnailCache().put(uriString, thumbnailData);
-    }
-    
-    /**
-     * Gets cached thumbnail for a video URI
-     */
-    public static byte[] getCachedThumbnail(String uriString) {
-        if (uriString == null) return null;
-        return getThumbnailCache().get(uriString);
-    }
-    
-    /**
-     * Clears the in-memory thumbnail cache.
-     */
-    public static void clearThumbnailCache() {
-        getThumbnailCache().evictAll();
-    }
-    
-    /**
-     * Saves thumbnail to disk cache
-     */
-    public static void saveThumbnailToDisk(Context context, String uriString, byte[] thumbnailData) {
-        if (context == null || uriString == null || thumbnailData == null) return;
-        
-        new Thread(() -> {
-            try {
-                File thumbnailDir = new File(context.getCacheDir(), THUMBNAIL_CACHE_DIR);
-                if (!thumbnailDir.exists()) {
-                    thumbnailDir.mkdirs();
-                }
-                
-                // Use hash of URI as filename to avoid filesystem issues
-                String filename = String.valueOf(uriString.hashCode()) + ".thumb";
-                File thumbnailFile = new File(thumbnailDir, filename);
-                
-                try (FileOutputStream fos = new FileOutputStream(thumbnailFile)) {
-                    fos.write(thumbnailData);
-                    fos.flush();
-                }
-            } catch (Exception e) {
-                FLog.e(TAG, "Error saving thumbnail to disk", e);
-            }
-        }).start();
-    }
-    
-    /**
-     * Loads thumbnail from disk cache
-     */
-    public static byte[] loadThumbnailFromDisk(Context context, String uriString) {
-        if (context == null || uriString == null) return null;
-        
-        try {
-            File thumbnailDir = new File(context.getCacheDir(), THUMBNAIL_CACHE_DIR);
-            String filename = String.valueOf(uriString.hashCode()) + ".thumb";
-            File thumbnailFile = new File(thumbnailDir, filename);
-            
-            if (!thumbnailFile.exists()) {
-                return null;
-            }
-            
-            try (FileInputStream fis = new FileInputStream(thumbnailFile)) {
-                byte[] data = new byte[(int) thumbnailFile.length()];
-                fis.read(data);
-                return data;
-            }
-        } catch (Exception e) {
-            FLog.e(TAG, "Error loading thumbnail from disk", e);
-            return null;
-        }
-    }
-    
-    /**
-     * Gets thumbnail with disk fallback
-     */
-    public static byte[] getThumbnailWithFallback(Context context, String uriString) {
-        // Try memory cache first
-        byte[] thumbnail = getCachedThumbnail(uriString);
-        if (thumbnail != null) {
-            return thumbnail;
-        }
-        
-        // Try disk cache
-        thumbnail = loadThumbnailFromDisk(context, uriString);
-        if (thumbnail != null) {
-            // Cache in memory for next time
-            cacheThumbnail(uriString, thumbnail);
-            return thumbnail;
-        }
-        
-        return null;
-    }
 }

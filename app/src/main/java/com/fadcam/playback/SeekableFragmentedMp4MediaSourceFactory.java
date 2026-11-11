@@ -1,6 +1,5 @@
 package com.fadcam.playback;
 
-import com.fadcam.Log;
 import com.fadcam.FLog;
 import android.content.Context;
 import android.media.MediaMetadataRetriever;
@@ -12,10 +11,8 @@ import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.DataSource;
-import androidx.media3.datasource.DataSpec;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.FileDataSource;
-import androidx.media3.datasource.TransferListener;
 import androidx.media3.exoplayer.source.ClippingMediaSource;
 import androidx.media3.exoplayer.source.MediaSource;
 import androidx.media3.exoplayer.source.ProgressiveMediaSource;
@@ -126,85 +123,14 @@ public class SeekableFragmentedMp4MediaSourceFactory {
                 .createMediaSource(mediaItem);
     }
 
-    /**
-     * Creates a MediaSource for a {@code content://} URI fMP4 file.
-     *
-     * <p>First tries to reconstruct the real file path from the SAF URI
-     * (e.g. {@code /storage/emulated/0/Download/FadCam/file.mp4}). If the
-     * file is accessible on disk, uses the full
-     * {@link FragmentedMp4IndexBuilder} approach (same quality as
-     * {@code file://} URIs). Otherwise falls back to the
-     * {@link ClippingMediaSource} approach with duration from
-     * {@link MediaMetadataRetriever}.
-     */
+    /** Reads the index from the original provider. Playback opens its own descriptor. */
     @NonNull
-    private MediaSource createContentUriMediaSource(@NonNull MediaItem mediaItem,
-                                                     @NonNull Uri uri) {
-        // Try to reconstruct path — if available, use full index-based approach
-        String reconstructedPath = tryReconstructFilePath(uri);
-        if (reconstructedPath != null) {
-            File file = new File(reconstructedPath);
-            FLog.d(TAG, "Content URI → reconstructed path: " + reconstructedPath);
-
-            long startTime = System.currentTimeMillis();
-            FragmentedMp4IndexBuilder.FragmentIndex fragmentIndex = indexBuilder.buildIndex(file);
-            long scanTime = System.currentTimeMillis() - startTime;
-            FLog.d(TAG, "Index built from content URI in " + scanTime + "ms: " +
-                  fragmentIndex.fragments.size() + " fragments, " +
-                  "duration=" + (fragmentIndex.durationUs / 1_000_000.0) + "s, " +
-                  "seekable=" + fragmentIndex.isSeekable);
-
-            // Build MediaItem from file URI for FileDataSource compatibility
-            Uri fileUri = Uri.fromFile(file);
-            MediaItem fileItem = MediaItem.fromUri(fileUri);
-
-            final FragmentedMp4IndexBuilder.FragmentIndex index = fragmentIndex;
-            ExtractorsFactory extractorsFactory = extractorsFactoryFor(index);
-
-            DataSource.Factory dataSourceFactory = new FileDataSource.Factory();
-            return new ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory)
-                    .createMediaSource(fileItem);
-        }
-
-        // Fallback 1: Use /proc/self/fd/ trick for full index-based seeking
-        // This works for any content:// URI including SD card files
-        FLog.d(TAG, "Path reconstruction failed, trying FD-based index building");
-        android.os.ParcelFileDescriptor pfd = null;
-        try {
-            pfd = context.getContentResolver().openFileDescriptor(uri, "r");
-            if (pfd != null) {
-                String fdPath = "/proc/self/fd/" + pfd.getFd();
-                File fdFile = new File(fdPath);
-                if (fdFile.exists() && fdFile.canRead()) {
-                    long startTime = System.currentTimeMillis();
-                    FragmentedMp4IndexBuilder.FragmentIndex fragmentIndex =
-                            indexBuilder.buildIndex(fdFile);
-                    long scanTime = System.currentTimeMillis() - startTime;
-                    FLog.d(TAG, "Index built from FD in " + scanTime + "ms: " +
-                          fragmentIndex.fragments.size() + " fragments, " +
-                          "duration=" + (fragmentIndex.durationUs / 1_000_000.0) + "s, " +
-                          "seekable=" + fragmentIndex.isSeekable);
-
-                    if (fragmentIndex.isSeekable && !fragmentIndex.fragments.isEmpty()) {
-                        final FragmentedMp4IndexBuilder.FragmentIndex index = fragmentIndex;
-                        ExtractorsFactory extractorsFactory = () -> new Extractor[] {
-                            new SeekMapInjectingExtractor(index)
-                        };
-                        DataSource.Factory ds = new DefaultDataSource.Factory(context);
-                        // Keep PFD open for the lifetime of playback
-                        final android.os.ParcelFileDescriptor keptPfd = pfd;
-                        pfd = null; // Prevent closing in finally
-                        return new ProgressiveMediaSource.Factory(ds, extractorsFactory)
-                                .createMediaSource(mediaItem);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            FLog.w(TAG, "FD-based index building failed: " + e.getMessage());
-        } finally {
-            if (pfd != null) {
-                try { pfd.close(); } catch (Exception ignored) {}
-            }
+    private MediaSource createContentUriMediaSource(@NonNull MediaItem mediaItem, @NonNull Uri uri) {
+        FragmentedMp4IndexBuilder.FragmentIndex index = scanContentIndex(uri);
+        if (index != null && index.isSeekable && !index.fragments.isEmpty()) {
+            return new ProgressiveMediaSource.Factory(
+                    new DefaultDataSource.Factory(context), extractorsFactoryFor(index))
+                    .createMediaSource(mediaItem);
         }
 
         // Fallback 2: For fMP4 without a file-level index, wrap with
@@ -241,66 +167,25 @@ public class SeekableFragmentedMp4MediaSourceFactory {
         }
     }
 
-    /**
-     * Attempts to reconstruct a real file system path from a SAF
-     * {@code content://} URI.
-     *
-     * <p>SAF URIs on primary/external storage often contain a colon-separated
-     * relative path. For example:
-     * <pre>
-     * content://...document/primary:Download/FadCam/file.mp4
-     * content://...document/XXXX-XXXX:FadCam/file.mp4  (SD card)
-     * </pre>
-     * This method checks ALL mounted storage volumes (internal + SD cards)
-     * instead of hardcoding {@code /storage/emulated/0/}.
-     *
-     * @return the reconstructed absolute path if the file exists and is
-     *         readable, or {@code null} otherwise.
-     */
     @Nullable
-    private String tryReconstructFilePath(@NonNull Uri uri) {
-        String path = uri.getPath();
-        if (path == null || !path.contains(":")) return null;
-
-        int lastColonIndex = path.lastIndexOf(':');
-        if (lastColonIndex < 0 || lastColonIndex >= path.length() - 1) return null;
-
-        String relativePath = path.substring(lastColonIndex + 1);
-
-        // Try all mounted storage volumes (internal + SD cards)
-        try {
-            File[] externalDirs = context.getExternalFilesDirs(null);
-            if (externalDirs != null) {
-                for (File dir : externalDirs) {
-                    if (dir == null) continue;
-                    // externalDirs paths: /storage/XXXX-XXXX/Android/data/com.fadcam/files
-                    String dirPath = dir.getAbsolutePath();
-                    int androidIdx = dirPath.indexOf("/Android/");
-                    if (androidIdx > 0) {
-                        String volumeRoot = dirPath.substring(0, androidIdx + 1);
-                        String reconstructed = volumeRoot + relativePath;
-                        File file = new File(reconstructed);
-                        if (file.exists() && file.canRead()) {
-                            return reconstructed;
-                        }
-                    }
-                }
-            }
+    FragmentedMp4IndexBuilder.FragmentIndex scanContentIndex(Uri uri) {
+        try (android.os.ParcelFileDescriptor pfd = openScanDescriptor(uri)) {
+            if (pfd == null) return null;
+            return scanDescriptor(pfd);
         } catch (Exception e) {
-            FLog.w(TAG, "Error resolving storage volumes: " + e.getMessage());
+            FLog.w(TAG, "Provider does not support descriptor indexing", e);
+            return null;
         }
-        return null;
     }
 
-    /**
-     * Retrieves the media duration using {@link MediaMetadataRetriever}, which
-     * correctly parses fragmented MP4 structure for both {@code file://} and
-     * {@code content://} URIs. For content:// URIs, tries the reconstructed
-     * file path first since {@code setDataSource(context, contentUri)} often
-     * returns 0 for fMP4 files.
-     *
-     * @return Duration in microseconds, or {@link C#TIME_UNSET} on failure.
-     */
+    android.os.ParcelFileDescriptor openScanDescriptor(Uri uri) throws IOException {
+        return context.getContentResolver().openFileDescriptor(uri, "r");
+    }
+
+    FragmentedMp4IndexBuilder.FragmentIndex scanDescriptor(android.os.ParcelFileDescriptor pfd) {
+        return indexBuilder.buildIndex(new File("/proc/self/fd/" + pfd.getFd()));
+    }
+
     private long getDurationFromRetriever(@NonNull Uri uri) {
         MediaMetadataRetriever retriever = null;
         try {
@@ -308,14 +193,7 @@ public class SeekableFragmentedMp4MediaSourceFactory {
             String scheme = uri.getScheme();
 
             if ("content".equals(scheme)) {
-                // Reconstructed path works much better for fMP4 files
-                String reconstructedPath = tryReconstructFilePath(uri);
-                if (reconstructedPath != null) {
-                    FLog.d(TAG, "Retriever: using reconstructed path: " + reconstructedPath);
-                    retriever.setDataSource(reconstructedPath);
-                } else {
-                    retriever.setDataSource(context, uri);
-                }
+                retriever.setDataSource(context, uri);
             } else if ("file".equals(scheme)) {
                 retriever.setDataSource(uri.getPath());
             } else {
@@ -392,7 +270,7 @@ public class SeekableFragmentedMp4MediaSourceFactory {
             int totalRead = 0;
             while (totalRead < data.length) {
                 int n = is.read(data, totalRead, data.length - totalRead);
-                if (n == -1) break;
+                if (n <= 0) break;
                 totalRead += n;
             }
 

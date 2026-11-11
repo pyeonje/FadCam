@@ -11,92 +11,622 @@ import android.view.*;
 import android.widget.*;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import com.fadcam.R;
 import com.mikimn.droiduvc.StreamMode;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** In-app USB input. No external APK, built-in Camera2 preference changes, or background streaming. */
 public class UsbCameraActivity extends AppCompatActivity implements TextureView.SurfaceTextureListener {
+    private static final String USB_REQUEST_ID="usb_request_id";
+    private static final AtomicInteger NEXT_USB_REQUEST_ID=new AtomicInteger();
     private UsbManager usb;
     private HandlerThread thread;
     private Handler worker;
     private final Handler main=new Handler(Looper.getMainLooper());
     private TextureView preview;
+    private SurfaceTexture previewTexture;
     private TextView status,zoomLabel;
     private Button choose,allow,modesButton,auto,photo;
     private SeekBar focus,zoomBar;
     private UsbDevice selected;
+    private long selectionRevision, cameraPermissionRevision;
+    private boolean cameraPermissionPending;
+    private PermissionRequest permissionRequest;
     private List<StreamMode> modes=Collections.emptyList();
     private StreamMode requested,actual;
     private volatile int generation;
-    private boolean active,registered,streaming,writingFocus,focusCommandPending,frameReady,savingPhoto;
+    private boolean active,registered,destroyed,opening,streaming,awaitingRetry,frameReady,savingPhoto;
     private float zoom=1f;
-    private UsbCameraBackend backend; // USB worker owns this reference and all native calls.
+    private long frameTimestampAtStart;
+    // The USB worker alone uses and closes the native backend and its Surface.
+    private UsbCameraBackend backend;
     private Surface surface;
+    private final Object ownership=new Object();
+    private final Set<Surface> pendingSurfaces=Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<SurfaceTexture> transferredTextures=Collections.newSetFromMap(new WeakHashMap<>());
+    private final Set<SurfaceTexture> pendingTextures=Collections.newSetFromMap(new IdentityHashMap<>());
+    private boolean workerTerminated;
+
     private UsbCameraBackend.FocusState focusState;
-    private final Runnable focusWrite=()->writeFocus();
-    private int pendingFocus;
+    private FocusCommand pendingFocus;
+    private Boolean desiredAutomatic;
+    private long focusRevision;
+    private boolean focusCommandPending;
+    private final Runnable focusWrite=this::writeFocus;
+
+    private static final class ConnectRequest {
+        final int generation;
+        final UsbManager manager;
+        final UsbDevice device;
+        final StreamMode mode;
+        final SurfaceTexture texture;
+        final Surface surface;
+        ConnectRequest(int generation,UsbManager manager,UsbDevice device,StreamMode mode,
+                       SurfaceTexture texture,Surface surface) {
+            this.generation=generation;this.manager=manager;this.device=device;
+            this.mode=mode;this.texture=texture;this.surface=surface;
+        }
+    }
+
+    private static final class PermissionRequest {
+        final int id;
+        final UsbDevice device;
+        final long revision;
+        final PendingIntent reply;
+        PermissionRequest(int id,UsbDevice device,long revision,PendingIntent reply) {
+            this.id=id;this.device=device;this.revision=revision;this.reply=reply;
+        }
+    }
+
+    private static final class FocusCommand {
+        final int generation,progress;
+        final long revision;
+        final Boolean automatic;
+        FocusCommand(int generation,long revision,Boolean automatic,int progress) {
+            this.generation=generation;this.revision=revision;this.automatic=automatic;this.progress=progress;
+        }
+    }
+
     private String permissionAction(){return getPackageName()+".USB_CAMERA_PERMISSION";}
-    private final ActivityResultLauncher<String> cameraPermission=registerForActivityResult(new ActivityResultContracts.RequestPermission(),granted->{if(granted)requestUsbPermission();else status.setText(R.string.usb_camera_denied);});
-    private final BroadcastReceiver receiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent intent){
-        if(permissionAction().equals(intent.getAction())){
-            if(selected!=null&&usb.hasPermission(selected))openSelected();else status.setText(R.string.usb_camera_denied);
-        }else refreshDevices();
-    }};
+    private final ActivityResultLauncher<String> cameraPermission=registerForActivityResult(
+            new ActivityResultContracts.RequestPermission(),granted->{
+                if(!cameraPermissionPending)return;
+                cameraPermissionPending=false;
+                if(!active||destroyed||selected==null||cameraPermissionRevision!=selectionRevision)return;
+                if(granted&&hasCameraPermission())requestUsbPermission();
+                else showPermissionRequired(false,true);
+            });
+    private final BroadcastReceiver receiver=new BroadcastReceiver(){
+        @Override public void onReceive(Context context,Intent intent){
+            if(permissionAction().equals(intent.getAction())){handleUsbPermission(intent);return;}
+            if(!active||destroyed)return;
+            if(UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction())
+                    && sameDevice(selected,intentDevice(intent)))selectDevice(null);
+            refreshDevices();
+        }
+    };
     @Override public void onCreate(Bundle saved){super.onCreate(saved);
         usb=(UsbManager)getSystemService(USB_SERVICE);
-        thread=new HandlerThread("FadCam-USB");thread.start();worker=new Handler(thread.getLooper());
+        startWorker();
         LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(Color.BLACK);root.setPadding(dp(12),0,dp(12),dp(10));
         root.setOnApplyWindowInsetsListener((v,insets)->{int left,top,right,bottom;if(Build.VERSION.SDK_INT>=30){android.graphics.Insets safe=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());left=safe.left;top=safe.top;right=safe.right;bottom=safe.bottom;}else{left=insets.getSystemWindowInsetLeft();top=insets.getSystemWindowInsetTop();right=insets.getSystemWindowInsetRight();bottom=insets.getSystemWindowInsetBottom();}v.setPadding(left+dp(12),top,right+dp(12),bottom+dp(10));return insets;});
         LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);Button back=button("‹");back.setContentDescription(getString(android.R.string.cancel));back.setOnClickListener(v->finish());header.addView(back,new LinearLayout.LayoutParams(dp(56),dp(48)));TextView title=text(getString(R.string.usb_camera_title),20);header.addView(title);root.addView(header);
         FrameLayout area=new FrameLayout(this);preview=new TextureView(this);preview.setSurfaceTextureListener(this);area.addView(preview,new FrameLayout.LayoutParams(-1,-1));root.addView(area,new LinearLayout.LayoutParams(-1,0,1));
-        ScaleGestureDetector pinch=new ScaleGestureDetector(this,new ScaleGestureDetector.SimpleOnScaleGestureListener(){@Override public boolean onScale(ScaleGestureDetector d){zoom=Math.max(1f,Math.min(8f,zoom*d.getScaleFactor()));transform();return true;}});
+        ScaleGestureDetector pinch=new ScaleGestureDetector(this,new ScaleGestureDetector.SimpleOnScaleGestureListener(){@Override public boolean onScale(ScaleGestureDetector d){if(!streaming)return false;zoom=Math.max(1f,Math.min(8f,zoom*d.getScaleFactor()));transform();return true;}});
         preview.setOnTouchListener((v,e)->{pinch.onTouchEvent(e);if(e.getActionMasked()==MotionEvent.ACTION_UP)v.performClick();return true;});
         status=text(getString(R.string.usb_camera_connect),14);status.setMaxLines(3);root.addView(status);
         LinearLayout connectionRow=new LinearLayout(this);choose=button(getString(R.string.usb_camera_choose));allow=button(getString(R.string.usb_camera_allow));connectionRow.addView(choose,new LinearLayout.LayoutParams(0,-2,1));connectionRow.addView(allow,new LinearLayout.LayoutParams(0,-2,1));root.addView(connectionRow);
         modesButton=button(getString(R.string.usb_camera_modes));root.addView(modesButton);modesButton.setEnabled(false);modesButton.setOnClickListener(v->showModes());
-        LinearLayout focusRow=new LinearLayout(this);auto=button("AF");auto.setEnabled(false);focusRow.addView(auto,new LinearLayout.LayoutParams(dp(72),dp(52)));focus=new SeekBar(this);focus.setMax(1000);focus.setEnabled(false);focus.setContentDescription(getString(R.string.personal_pro_focus_label));focusRow.addView(focus,new LinearLayout.LayoutParams(0,dp(52),1));root.addView(focusRow);
-        zoomLabel=text(getString(R.string.usb_camera_zoom,1f),14);root.addView(zoomLabel);zoomBar=new SeekBar(this);zoomBar.setMax(700);zoomBar.setContentDescription(getString(R.string.usb_camera_zoom,1f));zoomBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onProgressChanged(SeekBar b,int value,boolean user){if(user){zoom=1f+value/100f;transform();}}public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){}});root.addView(zoomBar);
+        LinearLayout focusRow=new LinearLayout(this);auto=button("—");auto.setEnabled(false);auto.setContentDescription(getString(R.string.usb_camera_focus_unavailable));focusRow.addView(auto,new LinearLayout.LayoutParams(dp(72),dp(52)));focus=new SeekBar(this);focus.setMax(1000);focus.setEnabled(false);focus.setContentDescription(getString(R.string.usb_camera_focus_unavailable));focusRow.addView(focus,new LinearLayout.LayoutParams(0,dp(52),1));root.addView(focusRow);
+        zoomLabel=text(getString(R.string.usb_camera_zoom,1f),14);root.addView(zoomLabel);zoomBar=new SeekBar(this);zoomBar.setMax(700);zoomBar.setEnabled(false);zoomBar.setContentDescription(getString(R.string.usb_camera_zoom,1f));zoomBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onProgressChanged(SeekBar b,int value,boolean user){if(user&&streaming){zoom=1f+value/100f;transform();}}public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){}});root.addView(zoomBar);
         photo=button(getString(R.string.usb_camera_photo));photo.setEnabled(false);photo.setOnClickListener(v->savePhoto());root.addView(photo);setContentView(root);
         choose.setOnClickListener(v->chooseDevice());allow.setOnClickListener(v->requestPermission());
-        auto.setOnClickListener(v->{if(focusState==null||!focusState.autoSupported||!streaming)return;final boolean next=!focusState.automatic;final int token=generation;auto.setEnabled(false);worker.post(()->{if(token!=generation||backend==null)return;try{UsbCameraBackend.FocusState state=backend.setAutoFocus(next);postFocus(token,state);}catch(Exception e){postControlFailure(token);}});});
-        focus.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onProgressChanged(SeekBar b,int value,boolean user){if(user&&streaming){pendingFocus=value;writingFocus=true;main.removeCallbacks(focusWrite);main.postDelayed(focusWrite,65);}}public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){if(writingFocus){main.removeCallbacks(focusWrite);focusWrite.run();}}});
+        auto.setOnClickListener(v->{
+            if(!streaming||focusState==null||!focusState.autoSupported)return;
+            boolean current=desiredAutomatic!=null?desiredAutomatic:focusState.automatic;
+            queueFocus(!current,0);
+        });
+        focus.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
+            @Override public void onProgressChanged(SeekBar bar,int value,boolean fromUser){
+                if(fromUser&&streaming&&focusState!=null&&focusState.manualSupported)queueFocus(null,value);
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar){}
+            @Override public void onStopTrackingTouch(SeekBar bar){main.removeCallbacks(focusWrite);writeFocus();}
+        });
     }
     TextView text(String value,int size){TextView t=new TextView(this);t.setText(value);t.setTextColor(Color.WHITE);t.setTextSize(size);return t;}
     Button button(String value){Button b=new Button(this);b.setText(value);b.setAllCaps(false);return b;}
     int dp(int n){return Math.round(n*getResources().getDisplayMetrics().density);}
-    @Override protected void onStart(){super.onStart();active=true;IntentFilter f=new IntentFilter(permissionAction());f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);ContextCompat.registerReceiver(this,receiver,f,ContextCompat.RECEIVER_NOT_EXPORTED);registered=true;refreshDevices();}
-    @Override protected void onStop(){active=false;if(registered){unregisterReceiver(receiver);registered=false;}stopSession();super.onStop();}
-    @Override protected void onDestroy(){stopSession();main.removeCallbacksAndMessages(null);worker.post(()->thread.quitSafely());super.onDestroy();}
-    List<UsbDevice> devices(){List<UsbDevice> result=new ArrayList<>();if(usb!=null)for(UsbDevice d:usb.getDeviceList().values())if(UsbCameraBackend.isVideoDevice(d))result.add(d);result.sort(Comparator.comparing(UsbDevice::getDeviceName));return result;}
-    void refreshDevices(){List<UsbDevice> list=devices();if(selected!=null){boolean present=false;for(UsbDevice d:list)if(d.getDeviceName().equals(selected.getDeviceName())){present=true;break;}if(!present){stopSession();selected=null;requested=null;}}
-        if(selected==null&&!list.isEmpty())selected=list.get(0);allow.setEnabled(selected!=null);choose.setEnabled(!list.isEmpty());if(selected==null)status.setText(R.string.usb_camera_connect);else if(!streaming&&active){if(usb.hasPermission(selected))openSelected();else status.setText(R.string.usb_camera_allow);}}
-    void chooseDevice(){List<UsbDevice> list=devices();String[] labels=new String[list.size()];for(int n=0;n<labels.length;n++)labels[n]=deviceLabel(list.get(n));new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(R.string.usb_camera_choose).setItems(labels,(d,n)->{stopSession();selected=list.get(n);requested=null;requestPermission();}).setNegativeButton(android.R.string.cancel,null).show();}
-    String deviceLabel(UsbDevice d){String name=d.getProductName();return (name==null?"USB camera":name)+String.format(Locale.ROOT," (%04x:%04x)",d.getVendorId(),d.getProductId());}
-    void requestPermission(){if(ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){cameraPermission.launch(Manifest.permission.CAMERA);return;}requestUsbPermission();}
-    void requestUsbPermission(){if(!active||selected==null)return;if(usb.hasPermission(selected)){openSelected();return;}Intent action=new Intent(permissionAction()).setPackage(getPackageName());PendingIntent reply=PendingIntent.getBroadcast(this,0,action,PendingIntent.FLAG_UPDATE_CURRENT|(Build.VERSION.SDK_INT>=31?PendingIntent.FLAG_MUTABLE:0));usb.requestPermission(selected,reply);}
-    UsbCameraBackend openBackend(UsbDevice device)throws Exception{return new UsbCameraBackend.Native(usb,device);}
-    void openSelected(){if(!active||selected==null||!preview.isAvailable()||!usb.hasPermission(selected)||ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED)return;
-        stopSession();final int token=generation;final UsbDevice device=selected;final Surface next=new Surface(preview.getSurfaceTexture());status.setText(R.string.usb_camera_opening);
-        worker.post(()->{if(generation!=token){next.release();return;}try{surface=next;backend=openBackend(device);List<StreamMode> supported=backend.modes();if(supported.isEmpty())throw new IllegalStateException("No renderable modes");StreamMode mode=requested!=null&&supported.contains(requested)?requested:initialMode(supported);StreamMode negotiated=backend.start(next,mode);UsbCameraBackend.FocusState fs;try{fs=backend.focusState();}catch(Exception unavailable){fs=new UsbCameraBackend.FocusState(false,false,false,0);}final UsbCameraBackend.FocusState found=fs;main.post(()->{if(!active||generation!=token)return;modes=supported;actual=negotiated;streaming=true;photo.setEnabled(frameReady);modesButton.setEnabled(true);status.setText(deviceLabel(device)+" · "+modeLabel(negotiated));bindFocus(found);transform();});}catch(Exception|LinkageError error){closeBackend();main.post(()->{if(active&&generation==token)status.setText(R.string.usb_camera_failed);});}});
+    @Override protected void onStart(){
+        super.onStart();
+        active=true;
+        IntentFilter filter=new IntentFilter(permissionAction());
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        ContextCompat.registerReceiver(this,receiver,filter,ContextCompat.RECEIVER_NOT_EXPORTED);
+        registered=true;
+        refreshDevices();
     }
-    static StreamMode initialMode(List<StreamMode> values){return Collections.min(values,Comparator.comparingLong(m->Math.abs((long)m.getWidth()*m.getHeight()-1280L*720)+Math.abs(m.getFps()-30)*10000L));}
-    static String modeLabel(StreamMode m){return m.getWidth()+" × "+m.getHeight()+" · "+m.getFps()+" fps · "+m.getFormat().name();}
-    void showModes(){String[] labels=new String[modes.size()];for(int n=0;n<labels.length;n++)labels[n]=modeLabel(modes.get(n));new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(R.string.usb_camera_modes).setItems(labels,(d,n)->{requested=modes.get(n);openSelected();}).setNegativeButton(android.R.string.cancel,null).show();}
-    void bindFocus(UsbCameraBackend.FocusState s){focusState=s;focus.setEnabled(streaming&&s.manualSupported);focus.setProgress(s.progress);auto.setEnabled(streaming&&s.autoSupported);auto.setText(s.automatic?"AF":"MF");if(!s.manualSupported&&!s.autoSupported)auto.setContentDescription(getString(R.string.usb_camera_no_focus));}
-    void writeFocus(){if(!writingFocus||!streaming||focusCommandPending)return;writingFocus=false;focusCommandPending=true;final int token=generation,value=pendingFocus;
-        worker.post(()->{if(token!=generation||backend==null)return;try{UsbCameraBackend.FocusState state=backend.setFocus(value);main.post(()->{if(active&&token==generation){focusCommandPending=false;if(!writingFocus)bindFocus(state);else writeFocus();}});}catch(Exception e){main.post(()->{if(active&&token==generation){focusCommandPending=false;writingFocus=false;status.setText(R.string.usb_camera_control_failed);}});}});
+
+    @Override protected void onResume(){super.onResume();refreshDevices();}
+
+    @Override protected void onStop(){
+        active=false;
+        if(registered){unregisterReceiver(receiver);registered=false;}
+        cancelUsbPermission();
+        stopSession();
+        super.onStop();
     }
-    void postFocus(int token,UsbCameraBackend.FocusState s){main.post(()->{if(active&&token==generation)bindFocus(s);});}
-    void postControlFailure(int token){main.post(()->{if(active&&token==generation){status.setText(R.string.usb_camera_control_failed);auto.setEnabled(focusState!=null&&focusState.autoSupported);}});}
-    void stopSession(){generation++;streaming=false;frameReady=false;writingFocus=false;focusCommandPending=false;main.removeCallbacks(focusWrite);if(photo!=null)photo.setEnabled(false);if(focus!=null)focus.setEnabled(false);if(auto!=null)auto.setEnabled(false);if(modesButton!=null)modesButton.setEnabled(false);if(worker!=null)worker.post(this::closeBackend);}
-    void closeBackend(){try{if(backend!=null)backend.close();}catch(Exception|LinkageError ignored){}finally{backend=null;if(surface!=null){surface.release();surface=null;}}}
-    void transform(){if(actual==null||preview.getWidth()==0||preview.getHeight()==0)return;float w=preview.getWidth(),h=preview.getHeight(),fit=Math.min(w/actual.getWidth(),h/actual.getHeight());Matrix m=new Matrix();m.setScale(actual.getWidth()*fit/w*zoom,actual.getHeight()*fit/h*zoom,w/2,h/2);preview.setTransform(m);zoomLabel.setText(getString(R.string.usb_camera_zoom,zoom));zoomBar.setProgress(Math.round((zoom-1f)*100));}
-    void savePhoto(){if(!streaming||!frameReady||savingPhoto||!preview.isAvailable())return;Bitmap bitmap=preview.getBitmap();if(bitmap==null)return;savingPhoto=true;photo.setEnabled(false);worker.post(()->{boolean saved=false;java.io.File file=null;try{java.io.File folder=new java.io.File(getExternalFilesDir(null),"FadCam/Camera/USB");if(!folder.isDirectory()&&!folder.mkdirs())throw new java.io.IOException("No output folder");file=java.io.File.createTempFile("USB_",".jpg",folder);try(java.io.FileOutputStream output=new java.io.FileOutputStream(file)){if(!bitmap.compress(Bitmap.CompressFormat.JPEG,95,output))throw new java.io.IOException("JPEG failed");}saved=true;RecordsFragment.requestRefresh();}catch(Exception e){if(file!=null)file.delete();}finally{bitmap.recycle();}final boolean done=saved;main.post(()->{savingPhoto=false;if(active){photo.setEnabled(streaming&&frameReady);Toast.makeText(this,done?R.string.usb_camera_saved:R.string.usb_camera_photo_failed,Toast.LENGTH_SHORT).show();}});});}
-    @Override public void onSurfaceTextureAvailable(SurfaceTexture texture,int width,int height){openSelected();}
-    @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture,int width,int height){transform();}
-    @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture){stopSession();worker.post(texture::release);return false;}
-    @Override public void onSurfaceTextureUpdated(SurfaceTexture texture){if(streaming){frameReady=true;photo.setEnabled(!savingPhoto);}}
+
+    @Override protected void onDestroy(){
+        if(!destroyed){
+            destroyed=true;
+            active=false;
+            cameraPermissionPending=false;
+            cancelUsbPermission();
+            stopSession();
+            main.removeCallbacksAndMessages(null);
+            quitWorker();
+        }
+        super.onDestroy();
+    }
+
+    void startWorker(){
+        thread=new HandlerThread("FadCam-USB"){
+            @Override public void run(){try{super.run();}finally{finishWorker();}}
+        };
+        thread.start();
+        worker=new Handler(thread.getLooper());
+    }
+
+    boolean postWorker(Runnable work){return worker!=null&&worker.post(work);}
+    void quitWorker(){if(thread!=null)thread.quitSafely();}
+
+    // The finalizer also owns releases registered after the queue started rejecting posts.
+    void finishWorker(){
+        closeBackend();
+        synchronized(ownership){
+            for(Surface pending:pendingSurfaces)pending.release();
+            pendingSurfaces.clear();
+            for(SurfaceTexture texture:pendingTextures)texture.release();
+            pendingTextures.clear();
+            workerTerminated=true;
+        }
+    }
+
+    private boolean hasCameraPermission(){
+        return ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED;
+    }
+
+    private static boolean sameDevice(UsbDevice first,UsbDevice second){
+        if(first==null||second==null)return false;
+        return first==second||(Objects.equals(first.getDeviceName(),second.getDeviceName())
+                &&first.getDeviceId()==second.getDeviceId()&&first.getVendorId()==second.getVendorId()
+                &&first.getProductId()==second.getProductId());
+    }
+
+    private static UsbDevice intentDevice(Intent intent){
+        if(Build.VERSION.SDK_INT>=33)return intent.getParcelableExtra(UsbManager.EXTRA_DEVICE,UsbDevice.class);
+        return intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+    }
+
+    List<UsbDevice> devices(){
+        List<UsbDevice> list=new ArrayList<>();
+        if(usb!=null)for(UsbDevice device:usb.getDeviceList().values())if(UsbCameraBackend.isVideoDevice(device))list.add(device);
+        list.sort(Comparator.comparing(UsbDevice::getDeviceName));
+        return list;
+    }
+
+    void refreshDevices(){
+        if(!active||destroyed)return;
+        List<UsbDevice> list=devices();
+        if(selected==null||list.stream().noneMatch(device->sameDevice(selected,device)))
+            selectDevice(list.isEmpty()?null:list.get(0));
+        choose.setEnabled(!list.isEmpty());
+        allow.setEnabled(selected!=null&&!streaming&&!opening);
+        if(selected==null)status.setText(R.string.usb_camera_connect);
+        else if(!hasCameraPermission())showPermissionRequired(false,false);
+        else if(!usb.hasPermission(selected))showPermissionRequired(true,false);
+        else {allow.setText(R.string.usb_camera_retry);openSelected();}
+    }
+
+    void selectDevice(UsbDevice device){
+        if((selected==null&&device==null)||sameDevice(selected,device))return;
+        cancelUsbPermission();
+        stopSession();
+        selectionRevision++;
+        selected=device;
+        allow.setEnabled(selected!=null);
+        clearModes();
+    }
+
+    private void clearModes(){
+        modes=Collections.emptyList();
+        requested=null;
+        awaitingRetry=false;
+        modesButton.setEnabled(false);
+    }
+
+    void chooseDevice(){
+        List<UsbDevice> choices=devices();
+        if(choices.isEmpty())return;
+        String[] labels=new String[choices.size()];
+        for(int n=0;n<labels.length;n++)labels[n]=deviceLabel(choices.get(n));
+        new AlertDialog.Builder(this).setTitle(R.string.usb_camera_choose).setItems(labels,(dialog,index)->{
+            UsbDevice choice=choices.get(index);
+            if(!active||destroyed)return;
+            if(devices().stream().noneMatch(device->sameDevice(choice,device))){refreshDevices();return;}
+            selectDevice(choice);
+            requestPermission();
+        }).setNegativeButton(android.R.string.cancel,null).show();
+    }
+
+    String deviceLabel(UsbDevice device){
+        String name=device.getProductName();
+        if(name==null||name.trim().isEmpty())name=getString(R.string.usb_camera_unknown_device);
+        return name+String.format(Locale.ROOT," (%04x:%04x)",device.getVendorId(),device.getProductId());
+    }
+
+    private void showPermissionRequired(boolean cameraAllowed,boolean denied){
+        if(opening||streaming)stopSession();
+        clearModes();
+        if(!cameraAllowed)cancelUsbPermission();
+        allow.setText(cameraAllowed?R.string.usb_camera_allow:R.string.usb_camera_allow_camera);
+        status.setText(cameraAllowed?(denied?R.string.usb_camera_denied:R.string.usb_camera_allow)
+                :(denied?R.string.usb_camera_camera_denied:R.string.usb_camera_camera_required));
+    }
+
+    void requestPermission(){
+        if(!active||destroyed||selected==null)return;
+        if(!hasCameraPermission()){
+            showPermissionRequired(false,false);
+            if(!cameraPermissionPending){
+                cameraPermissionPending=true;
+                cameraPermissionRevision=selectionRevision;
+                cameraPermission.launch(Manifest.permission.CAMERA);
+            }
+        }else requestUsbPermission();
+    }
+
+    void requestUsbPermission(){
+        if(!active||destroyed||selected==null)return;
+        if(!hasCameraPermission()){showPermissionRequired(false,false);return;}
+        if(usb.hasPermission(selected)){allow.setText(R.string.usb_camera_retry);startConnection(awaitingRetry);return;}
+        showPermissionRequired(true,false);
+        if(permissionRequest!=null)return;
+        int id=NEXT_USB_REQUEST_ID.incrementAndGet();
+        Intent action=new Intent(permissionAction()).setPackage(getPackageName()).putExtra(USB_REQUEST_ID,id);
+        PendingIntent reply=PendingIntent.getBroadcast(this,id,action,
+                Build.VERSION.SDK_INT>=31?PendingIntent.FLAG_MUTABLE:0);
+        PermissionRequest request=new PermissionRequest(id,selected,selectionRevision,reply);
+        permissionRequest=request;
+        try{usb.requestPermission(request.device,request.reply);}
+        catch(RuntimeException unavailable){cancelUsbPermission();showPermissionRequired(true,true);}
+    }
+
+    private void cancelUsbPermission(){
+        if(permissionRequest!=null){permissionRequest.reply.cancel();permissionRequest=null;}
+    }
+
+    private void handleUsbPermission(Intent intent){
+        PermissionRequest request=permissionRequest;
+        if(!active||destroyed||request==null||request.revision!=selectionRevision
+                ||intent.getIntExtra(USB_REQUEST_ID,0)!=request.id||!sameDevice(request.device,selected)
+                ||!sameDevice(request.device,intentDevice(intent)))return;
+        cancelUsbPermission();
+        if(!hasCameraPermission())showPermissionRequired(false,false);
+        else if(!intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false)||!usb.hasPermission(request.device))
+            showPermissionRequired(true,true);
+        else {allow.setText(R.string.usb_camera_retry);startConnection(false);}
+    }
+
+    UsbCameraBackend openBackend(UsbManager manager,UsbDevice device)throws Exception{
+        return new UsbCameraBackend.Native(manager,device);
+    }
+    Surface createSurface(SurfaceTexture texture){return new Surface(texture);}
+    void openSelected(){startConnection(false);}
+
+    private void startConnection(boolean force){
+        if(!active||destroyed||selected==null||previewTexture==null)return;
+        if(!hasCameraPermission()){showPermissionRequired(false,false);return;}
+        if(!usb.hasPermission(selected)){showPermissionRequired(true,false);return;}
+        if(!force&&(opening||streaming||awaitingRetry))return;
+        stopSession();
+        SurfaceTexture texture=previewTexture;
+        final Surface next;
+        try{next=createSurface(texture);}
+        catch(RuntimeException unavailable){connectionFailed();return;}
+        ConnectRequest request=new ConnectRequest(generation,usb,selected,requested,texture,next);
+        opening=true;
+        awaitingRetry=false;
+        allow.setEnabled(false);
+        status.setText(R.string.usb_camera_opening);
+        synchronized(ownership){
+            if(!workerTerminated){
+                pendingSurfaces.add(next);
+                if(postWorker(()->connect(request)))return;
+                pendingSurfaces.remove(next);
+            }
+        }
+        // The rejected task never gave this Surface to native code.
+        next.release();
+        connectionFailed();
+        quitWorker();
+    }
+
+    private boolean current(ConnectRequest request){
+        return active&&!destroyed&&request.generation==generation&&sameDevice(request.device,selected);
+    }
+
+    private boolean canContinue(ConnectRequest request){
+        if(request.generation!=generation)return false;
+        boolean cameraAllowed=hasCameraPermission();
+        if(cameraAllowed&&request.manager.hasPermission(request.device))return request.generation==generation;
+        main.post(()->{if(current(request))showPermissionRequired(cameraAllowed,false);});
+        return false;
+    }
+
+    private void connectionFailed(){
+        opening=false;
+        awaitingRetry=true;
+        allow.setEnabled(selected!=null);
+        status.setText(R.string.usb_camera_failed);
+    }
+
+    private void connect(ConnectRequest request){
+        UsbCameraBackend opened=null;
+        boolean kept=false;
+        try{
+            if(!canContinue(request))return;
+            opened=openBackend(request.manager,request.device);
+            if(!canContinue(request))return;
+            List<StreamMode> available=Collections.unmodifiableList(new ArrayList<>(opened.modes()));
+            if(!canContinue(request))return;
+            main.post(()->{if(current(request)){modes=available;modesButton.setEnabled(!available.isEmpty());}});
+            if(available.isEmpty())throw new IllegalStateException("No renderable USB modes");
+            StreamMode mode=available.contains(request.mode)?request.mode:initialMode(available);
+            if(!canContinue(request))return;
+            // TextureView can report an update after a resize without consuming a camera frame.
+            long previousFrameTimestamp=request.texture.getTimestamp();
+            StreamMode negotiated=Objects.requireNonNull(opened.start(request.surface,mode));
+            if(!canContinue(request))return;
+            backend=opened;
+            surface=request.surface;
+            kept=true;
+            main.post(()->{
+                if(!current(request))return;
+                actual=negotiated;
+                opening=false;
+                streaming=true;
+                frameTimestampAtStart=previousFrameTimestamp;
+                allow.setEnabled(false);
+                zoomBar.setEnabled(true);
+                status.setText(deviceLabel(request.device)+" · "+modeLabel(negotiated));
+                transform();
+                checkPhotoFrame(request.texture);
+            });
+            if(!canContinue(request))return;
+            UsbCameraBackend.FocusState state;
+            try{state=opened.focusState();}catch(Exception|LinkageError unavailable){state=null;}
+            if(!canContinue(request))return;
+            final UsbCameraBackend.FocusState found=state;
+            main.post(()->{if(current(request))bindFocus(found);});
+        }catch(Exception|LinkageError failure){
+            main.post(()->{if(current(request))connectionFailed();});
+        }finally{
+            synchronized(ownership){pendingSurfaces.remove(request.surface);}
+            if(!kept)closeResources(opened,request.surface);
+        }
+    }
+
+    static StreamMode initialMode(List<StreamMode> values){
+        return Collections.min(values,Comparator.comparingLong(mode->Math.abs((long)mode.getWidth()*mode.getHeight()-1280L*720)
+                +Math.abs(mode.getFps()-30)*10000L));
+    }
+    static String modeLabel(StreamMode mode){
+        return mode.getWidth()+" × "+mode.getHeight()+" · "+mode.getFps()+" fps · "+mode.getFormat().name();
+    }
+    void showModes(){
+        List<StreamMode> choices=modes;
+        UsbDevice device=selected;
+        if(!active||destroyed||choices.isEmpty())return;
+        String[] labels=new String[choices.size()];
+        for(int n=0;n<labels.length;n++)labels[n]=modeLabel(choices.get(n));
+        new AlertDialog.Builder(this).setTitle(R.string.usb_camera_modes)
+                .setItems(labels,(dialog,index)->selectMode(device,choices.get(index)))
+                .setNegativeButton(android.R.string.cancel,null).show();
+    }
+    void selectMode(UsbDevice device,StreamMode mode){
+        if(!active||destroyed||!sameDevice(device,selected)||!modes.contains(mode))return;
+        requested=mode;
+        startConnection(true);
+    }
+
+    void bindFocus(UsbCameraBackend.FocusState state){
+        focusState=state;
+        if(state!=null)focus.setProgress(state.progress);
+        renderFocus();
+    }
+
+    private void renderFocus(){
+        boolean canAuto=streaming&&focusState!=null&&focusState.autoSupported;
+        boolean canManual=streaming&&focusState!=null&&focusState.manualSupported;
+        focus.setEnabled(canManual);
+        focus.setContentDescription(getString(canManual?R.string.usb_camera_manual_focus:R.string.usb_camera_focus_unavailable));
+        auto.setEnabled(canAuto);
+        boolean automatic=desiredAutomatic!=null?desiredAutomatic:focusState!=null&&focusState.automatic;
+        auto.setText(canAuto||canManual?(automatic?"AF":"MF"):"—");
+        auto.setContentDescription(getString(canAuto
+                ?(automatic?R.string.usb_camera_switch_to_mf:R.string.usb_camera_switch_to_af)
+                :(canManual?R.string.usb_camera_manual_focus:R.string.usb_camera_focus_unavailable)));
+    }
+
+    private void queueFocus(Boolean automatic,int progress){
+        pendingFocus=new FocusCommand(generation,++focusRevision,automatic,progress);
+        desiredAutomatic=automatic!=null&&automatic;
+        main.removeCallbacks(focusWrite);
+        renderFocus();
+        if(automatic!=null)writeFocus();else main.postDelayed(focusWrite,65);
+    }
+
+    void writeFocus(){
+        if(!streaming||focusCommandPending||pendingFocus==null)return;
+        FocusCommand command=pendingFocus;
+        pendingFocus=null;
+        focusCommandPending=true;
+        if(!postWorker(()->runFocus(command)))completeFocus(command,null,true);
+    }
+
+    private void runFocus(FocusCommand command){
+        if(command.generation!=generation)return;
+        UsbCameraBackend.FocusState state=null;
+        boolean failed=false;
+        if(backend==null)failed=true;
+        else try{
+            state=command.automatic==null?backend.setFocus(command.progress):backend.setAutoFocus(command.automatic);
+        }catch(Exception|LinkageError error){
+            failed=true;
+            if(command.generation==generation)try{state=backend.focusState();}catch(Exception|LinkageError ignored){}
+        }
+        final UsbCameraBackend.FocusState found=state;
+        final boolean error=failed;
+        main.post(()->completeFocus(command,found,error));
+    }
+
+    private void completeFocus(FocusCommand command,UsbCameraBackend.FocusState state,boolean failed){
+        if(!active||destroyed||command.generation!=generation)return;
+        focusCommandPending=false;
+        if(command.revision==focusRevision){
+            desiredAutomatic=null;
+            bindFocus(state);
+            if(failed)status.setText(R.string.usb_camera_control_failed);
+            else if(actual!=null&&selected!=null)status.setText(deviceLabel(selected)+" · "+modeLabel(actual));
+        }
+        writeFocus();
+    }
+
+    void stopSession(){
+        generation++;
+        opening=false;
+        streaming=false;
+        actual=null;
+        frameReady=false;
+        focusCommandPending=false;
+        pendingFocus=null;
+        desiredAutomatic=null;
+        main.removeCallbacks(focusWrite);
+        if(!destroyed&&photo!=null){
+            photo.setEnabled(false);
+            zoomBar.setEnabled(false);
+            allow.setEnabled(selected!=null);
+            bindFocus(null);
+        }
+        if(!postWorker(this::closeBackend))quitWorker();
+    }
+
+    private void closeBackend(){
+        UsbCameraBackend owned=backend;
+        Surface target=surface;
+        backend=null;
+        surface=null;
+        closeResources(owned,target);
+    }
+
+    private static void closeResources(UsbCameraBackend backend,Surface surface){
+        try{if(backend!=null)backend.close();}
+        catch(Exception|LinkageError ignored){}
+        finally{if(surface!=null)surface.release();}
+    }
+
+    void transform(){
+        if(actual==null||preview.getWidth()==0||preview.getHeight()==0)return;
+        float width=preview.getWidth(),height=preview.getHeight();
+        float fit=Math.min(width/actual.getWidth(),height/actual.getHeight());
+        Matrix matrix=new Matrix();
+        matrix.setScale(actual.getWidth()*fit/width*zoom,actual.getHeight()*fit/height*zoom,width/2,height/2);
+        preview.setTransform(matrix);
+        String label=getString(R.string.usb_camera_zoom,zoom);
+        zoomLabel.setText(label);
+        zoomBar.setContentDescription(label);
+        zoomBar.setProgress(Math.round((zoom-1f)*100));
+    }
+
+    void savePhoto(){
+        if(!streaming||!frameReady||savingPhoto||!preview.isAvailable())return;
+        Bitmap bitmap=preview.getBitmap();
+        if(bitmap==null)return;
+        savingPhoto=true;
+        photo.setEnabled(false);
+        if(!postWorker(()->{
+            boolean saved=false;
+            java.io.File file=null;
+            try{
+                java.io.File external=getExternalFilesDir(null);
+                if(external==null)throw new java.io.IOException("No external output");
+                java.io.File folder=new java.io.File(external,"FadCam/Camera/USB");
+                if(!folder.isDirectory()&&!folder.mkdirs())throw new java.io.IOException("No output folder");
+                file=java.io.File.createTempFile("USB_",".jpg",folder);
+                try(java.io.FileOutputStream output=new java.io.FileOutputStream(file)){
+                    if(!bitmap.compress(Bitmap.CompressFormat.JPEG,95,output))throw new java.io.IOException("JPEG failed");
+                }
+                saved=true;
+                RecordsFragment.requestRefresh();
+            }catch(Exception failure){
+                if(file!=null)file.delete();
+            }finally{bitmap.recycle();}
+            final boolean done=saved;
+            main.post(()->completePhoto(done));
+        })){
+            bitmap.recycle();
+            completePhoto(false);
+        }
+    }
+
+    private void completePhoto(boolean saved){
+        savingPhoto=false;
+        if(active&&!destroyed){
+            photo.setEnabled(streaming&&frameReady);
+            Toast.makeText(this,saved?R.string.usb_camera_saved:R.string.usb_camera_photo_failed,Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override public void onSurfaceTextureAvailable(SurfaceTexture texture,int width,int height){
+        if(destroyed)return;
+        previewTexture=texture;
+        openSelected();
+    }
+
+    @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture,int width,int height){
+        if(!destroyed&&texture==previewTexture)transform();
+    }
+
+    @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture){
+        if(texture==previewTexture){
+            previewTexture=null;
+            if(!destroyed)stopSession();
+        }
+        synchronized(ownership){
+            if(transferredTextures.contains(texture))return false;
+            if(workerTerminated)return true; // No native user remains; TextureView can release it.
+            transferredTextures.add(texture);
+            pendingTextures.add(texture);
+            if(!postWorker(()->{
+                synchronized(ownership){if(pendingTextures.remove(texture))texture.release();}
+            }))quitWorker();
+            return false;
+        }
+    }
+
+    @Override public void onSurfaceTextureUpdated(SurfaceTexture texture){checkPhotoFrame(texture);}
+
+    private void checkPhotoFrame(SurfaceTexture texture){
+        if(!active||destroyed||!streaming||frameReady||texture!=previewTexture)return;
+        if(texture.getTimestamp()==frameTimestampAtStart)return;
+        frameReady=true;
+        photo.setEnabled(!savingPhoto);
+    }
 }

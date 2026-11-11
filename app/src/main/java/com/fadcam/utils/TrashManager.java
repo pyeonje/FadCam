@@ -7,6 +7,7 @@ import android.net.Uri;
 import android.os.Environment;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
+import android.util.AtomicFile;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -97,41 +98,67 @@ public class TrashManager {
      * @return A List of TrashItem objects. Returns an empty list if the file
      *         doesn't exist or an error occurs.
      */
-    public static List<TrashItem> loadTrashMetadata(Context context) {
+    public static synchronized List<TrashItem> loadTrashMetadata(Context context) {
         if (context == null) {
             FLog.e(TAG, "Context is null, cannot load trash metadata.");
             return new ArrayList<>();
         }
         File metadataFile = new File(context.getFilesDir(), Constants.TRASH_METADATA_FILENAME);
-        if (!metadataFile.exists()) {
-            FLog.i(TAG, "Trash metadata file does not exist. Returning empty list.");
-            return new ArrayList<>();
+        List<TrashItem> items = new ArrayList<>();
+        boolean readable = true;
+        try {
+            byte[] bytes = new AtomicFile(metadataFile).readFully();
+            List<TrashItem> parsed = new Gson().fromJson(new String(bytes, StandardCharsets.UTF_8),
+                    new TypeToken<ArrayList<TrashItem>>() {}.getType());
+            if (parsed != null) items.addAll(parsed);
+        } catch (IOException | RuntimeException e) {
+            readable = !metadataFile.exists();
+            if (!readable) FLog.e(TAG, "휴지통 목록을 읽을 수 없습니다.", e);
         }
-
-        Gson gson = new Gson();
-        Type listType = new TypeToken<ArrayList<TrashItem>>() {
-        }.getType();
-
-        try (FileInputStream fis = new FileInputStream(metadataFile);
-                InputStreamReader isr = new InputStreamReader(fis, StandardCharsets.UTF_8);
-                BufferedReader reader = new BufferedReader(isr)) {
-            List<TrashItem> items = gson.fromJson(reader, listType);
-            if (items == null) {
-                FLog.w(TAG, "Parsed trash metadata is null. Returning empty list.");
-                return new ArrayList<>();
+        File journalDir = new File(context.getFilesDir(), "trash-move-journal");
+        File[] records = journalDir.listFiles((dir, name) -> name.endsWith(".json"));
+        File[] restores = new File(context.getFilesDir(), "trash-restore-journal")
+                .listFiles((dir, name) -> name.endsWith(".json"));
+        if ((records == null || records.length == 0) && (restores == null || restores.length == 0)) return items;
+        File trashDir = getTrashDirectory(context);
+        if (trashDir == null) return items;
+        List<File> reconciled = new ArrayList<>();
+        for (File record : records == null ? new File[0] : records) {
+            try {
+                TrashItem item = new Gson().fromJson(new String(new AtomicFile(record).readFully(),
+                        StandardCharsets.UTF_8), TrashItem.class);
+                if (item == null || item.getTrashFileName() == null) continue;
+                File file = new File(trashDir, item.getTrashFileName());
+                if (!file.isFile()) {
+                    reconciled.add(record);
+                    continue;
+                }
+                if (file.length() != item.getSizeBytes()) continue;
+                if (!items.contains(item)) items.add(item);
+                reconciled.add(record);
+            } catch (IOException | RuntimeException e) {
+                FLog.w(TAG, "휴지통 이동 복구 기록을 읽을 수 없습니다.", e);
             }
-            FLog.i(TAG, "Loaded " + items.size() + " items from trash metadata.");
-            return items;
-        } catch (IOException e) {
-            FLog.e(TAG, "IOException loading trash metadata from " + metadataFile.getAbsolutePath(), e);
-        } catch (com.google.gson.JsonSyntaxException e) {
-            FLog.e(TAG, "JsonSyntaxException parsing trash metadata. File might be corrupt: "
-                    + metadataFile.getAbsolutePath(), e);
-            // Optionally, attempt to delete the corrupt file here so it can be recreated
-            // cleanly next time.
-            // metadataFile.delete();
         }
-        return new ArrayList<>(); // Return empty list on error
+        for (File record : restores == null ? new File[0] : restores) {
+            try {
+                RestoreRecord restore = new Gson().fromJson(new String(new AtomicFile(record).readFully(),
+                        StandardCharsets.UTF_8), RestoreRecord.class);
+                if (restore == null || restore.item == null || restore.destination == null) continue;
+                File original = new File(trashDir, restore.item.getTrashFileName());
+                // Keep the trash entry unless a completed destination can be identified.
+                if (!original.exists() && getUriSize(context, Uri.parse(restore.destination)) == restore.bytes) {
+                    items.remove(restore.item);
+                    reconciled.add(record);
+                }
+            } catch (IOException | RuntimeException e) {
+                FLog.w(TAG, "휴지통 복원 기록을 읽을 수 없습니다.", e);
+            }
+        }
+        if (readable && !reconciled.isEmpty() && saveTrashMetadata(context, items)) {
+            for (File record : reconciled) new AtomicFile(record).delete();
+        }
+        return items;
     }
 
     /**
@@ -141,7 +168,7 @@ public class TrashManager {
      * @param items   The list of TrashItem objects to save.
      * @return true if saving was successful, false otherwise.
      */
-    public static boolean saveTrashMetadata(Context context, List<TrashItem> items) {
+    public static synchronized boolean saveTrashMetadata(Context context, List<TrashItem> items) {
         if (context == null) {
             FLog.e(TAG, "Context is null, cannot save trash metadata.");
             return false;
@@ -152,16 +179,33 @@ public class TrashManager {
         }
 
         File metadataFile = new File(context.getFilesDir(), Constants.TRASH_METADATA_FILENAME);
-        Gson gson = new Gson();
+        if (metadataFile.isDirectory()) return false;
+        // Refuse to replace a pre-existing but unreadable list.
+        if (metadataFile.isFile()) {
+            try {
+                new Gson().fromJson(new String(new AtomicFile(metadataFile).readFully(), StandardCharsets.UTF_8),
+                        new TypeToken<ArrayList<TrashItem>>() {}.getType());
+            } catch (IOException | RuntimeException e) {
+                return false;
+            }
+        }
+        return writeAtomic(metadataFile, new Gson().toJson(items));
+    }
 
-        try (FileOutputStream fos = new FileOutputStream(metadataFile); // Overwrites the file
-                OutputStreamWriter osw = new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
-            gson.toJson(items, osw);
-            FLog.i(TAG, "Successfully saved " + items.size() + " items to trash metadata at "
-                    + metadataFile.getAbsolutePath());
-            return true;
-        } catch (IOException e) {
-            FLog.e(TAG, "IOException saving trash metadata to " + metadataFile.getAbsolutePath(), e);
+    private static boolean writeAtomic(File file, String json) {
+        AtomicFile atomic = new AtomicFile(file);
+        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+        FileOutputStream out = null;
+        try {
+            out = atomic.startWrite();
+            out.write(bytes);
+            out.getFD().sync();
+            atomic.finishWrite(out);
+            out = null;
+            return java.util.Arrays.equals(bytes, atomic.readFully());
+        } catch (IOException | RuntimeException e) {
+            if (out != null) atomic.failWrite(out);
+            FLog.e(TAG, "휴지통 기록을 저장할 수 없습니다.", e);
             return false;
         }
     }
@@ -214,7 +258,7 @@ public class TrashManager {
         );
     }
 
-    public static boolean moveToTrash(
+    public static synchronized boolean moveToTrash(
             Context context,
             Uri videoUri,
             String originalDisplayName,
@@ -241,140 +285,122 @@ public class TrashManager {
             return false;
         }
 
-        boolean success = false;
-        long copiedBytes = 0L;
-        long totalBytes = getUriSize(context, videoUri);
-        FLog.i(TAG, "Attempting to move to trash: '" + originalDisplayName + "' -> '" + targetTrashFile.getAbsolutePath()
-                + "'");
-
-        if (isSafSource) {
-            // Handle SAF URI (content://)
-            try (InputStream in = context.getContentResolver().openInputStream(videoUri);
-                    OutputStream out = new FileOutputStream(targetTrashFile)) {
-                if (in == null) {
-                    FLog.e(TAG, "moveToTrash: Failed to open InputStream for SAF URI: " + videoUri);
-                    return false;
-                }
-                byte[] buf = new byte[8192];
-                int len;
-                while ((len = in.read(buf)) > 0) {
-                    out.write(buf, 0, len);
-                    copiedBytes += len;
-                    dispatchProgress(progressListener, copiedBytes, totalBytes);
-                }
-                success = true;
-                FLog.d(TAG, "moveToTrash: Successfully COPIED SAF URI " + videoUri + " to "
-                        + targetTrashFile.getAbsolutePath());
-                // Now delete the original SAF document
-                if (DocumentsContract.deleteDocument(context.getContentResolver(), videoUri)) {
-                    FLog.d(TAG, "moveToTrash: Successfully DELETED original SAF document: " + videoUri);
-                } else {
-                    FLog.w(TAG, "moveToTrash: Failed to delete original SAF document: " + videoUri
-                            + " (but copy to trash succeeded).");
-                    // Proceed with trashing metadata, as copy was successful.
-                }
-            } catch (Exception e) {
-                FLog.e(TAG, "moveToTrash: Error copying/deleting SAF URI " + videoUri, e);
-                if (targetTrashFile.exists())
-                    targetTrashFile.delete(); // Clean up partial copy
-                success = false;
+        File original = isSafSource || videoUri.getPath() == null ? null : new File(videoUri.getPath());
+        if (!isSafSource && (original == null || !original.isFile())) return false;
+        long expected = original != null ? original.length() : getUriSize(context, videoUri);
+        List<TrashItem> items = loadTrashMetadata(context);
+        File journalDir = new File(context.getFilesDir(), "trash-move-journal");
+        if (!journalDir.isDirectory() && !journalDir.mkdirs()) return false;
+        File record = new File(journalDir, java.util.UUID.randomUUID() + ".json");
+        TrashItem item = new TrashItem(videoUri.toString(), originalDisplayName, targetTrashFileName,
+                System.currentTimeMillis(), isSafSource, expected);
+        boolean renamed = false;
+        boolean deletionAttempted = false;
+        boolean targetCreated = false;
+        boolean saved = false;
+        try {
+            if (original != null) {
+                if (!writeAtomic(record, new Gson().toJson(item))) return false;
+                renamed = !targetTrashFile.exists() && original.renameTo(targetTrashFile);
+                if (renamed) dispatchProgress(progressListener, expected, expected);
             }
-        } else {
-            // Handle direct file URI (file://)
-            File sourceFile = new File(videoUri.getPath());
-            if (sourceFile.exists()) {
-                if (sourceFile.renameTo(targetTrashFile)) {
-                    success = true;
-                    FLog.d(TAG, "moveToTrash: Successfully MOVED internal file " + sourceFile.getAbsolutePath() + " to "
-                            + targetTrashFile.getAbsolutePath());
-                } else {
-                    FLog.e(TAG, "moveToTrash: Failed to move internal file " + sourceFile.getAbsolutePath());
-                    // As a fallback, try copy-delete for internal files if move fails (e.g., across
-                    // different filesystems on some rooted devices)
-                    try (InputStream in = new FileInputStream(sourceFile);
-                            OutputStream out = new FileOutputStream(targetTrashFile)) {
-                        byte[] buf = new byte[8192];
-                        int len;
-                        while ((len = in.read(buf)) > 0) {
-                            out.write(buf, 0, len);
-                            copiedBytes += len;
-                            dispatchProgress(progressListener, copiedBytes, totalBytes <= 0L ? sourceFile.length() : totalBytes);
-                        }
-                        FLog.d(TAG, "moveToTrash: Fallback - Successfully COPIED internal file "
-                                + sourceFile.getAbsolutePath());
-                        if (sourceFile.delete()) {
-                            FLog.d(TAG, "moveToTrash: Fallback - Successfully DELETED original internal file.");
-                            success = true;
-                        } else {
-                            FLog.w(TAG,
-                                    "moveToTrash: Fallback - Failed to delete original internal file after copy. Manual cleanup of trash item might be needed if metadata is added.");
-                            if (targetTrashFile.exists())
-                                targetTrashFile.delete(); // remove the copy from trash
-                            success = false;
-                        }
-                    } catch (IOException ioe) {
-                        FLog.e(TAG, "moveToTrash: Fallback - IOException during copy for internal file "
-                                + sourceFile.getAbsolutePath(), ioe);
-                        if (targetTrashFile.exists())
-                            targetTrashFile.delete(); // Clean up partial copy
-                        success = false;
-                    }
-                }
-            } else {
-                FLog.e(TAG, "moveToTrash: Source file does not exist for URI: " + videoUri);
-                success = false;
+            if (!renamed) {
+                // Do not expose an incomplete copy as a recoverable file.
+                new AtomicFile(record).delete();
+                if (!targetTrashFile.createNewFile()) return false;
+                targetCreated = true;
+                long copied = copyClosed(
+                        () -> original != null ? new FileInputStream(original)
+                                : context.getContentResolver().openInputStream(videoUri),
+                        () -> new FileOutputStream(targetTrashFile), expected,
+                        progressListener);
+                if (targetTrashFile.length() != copied) throw new IOException("휴지통 사본 크기 불일치");
+                item.setSizeBytes(copied);
+                if (!writeAtomic(record, new Gson().toJson(item))) return false;
+                deletionAttempted = true;
+                boolean deleted = original != null ? original.delete()
+                        : DocumentsContract.deleteDocument(context.getContentResolver(), videoUri);
+                if (!deleted) return false;
             }
-        }
-
-        if (success) {
-            if (!isSafSource && copiedBytes <= 0L) {
-                dispatchProgress(progressListener, sourceLengthForProgress(videoUri), sourceLengthForProgress(videoUri));
-            } else {
-                dispatchProgress(progressListener, Math.max(copiedBytes, totalBytes), totalBytes);
+            items.add(item);
+            saved = saveTrashMetadata(context, items);
+            if (!saved) return false;
+            if (SharedPreferencesManager.getInstance(context).getTrashAutoDeleteMinutes() == 0
+                    && targetTrashFile.delete()) {
+                items.remove(item);
+                saveTrashMetadata(context, items);
             }
-            int minutes = com.fadcam.SharedPreferencesManager.getInstance(context).getTrashAutoDeleteMinutes();
-            if (minutes == 0) {
-                FLog.i(TAG, "moveToTrash: Immediate auto-delete active. Deleting trash file without metadata round-trip.");
-                if (targetTrashFile.exists() && targetTrashFile.delete()) {
-                    FLog.d(TAG, "moveToTrash: Immediate auto-delete removed " + targetTrashFile.getAbsolutePath());
-                    return true;
-                }
-                FLog.w(TAG, "moveToTrash: Immediate auto-delete failed; falling back to tracked trash metadata flow.");
-            }
-
-            List<TrashItem> trashItems = loadTrashMetadata(context);
-            // Use actual file size if available, otherwise fall back to totalBytes calculated from source
-            long fileSizeBytes = 0L;
-            if (targetTrashFile.exists()) {
-                long actualSize = targetTrashFile.length();
-                // Use actual file size, or fall back to totalBytes if actual size is 0 but we had data
-                fileSizeBytes = (actualSize > 0L) ? actualSize : Math.max(0L, totalBytes);
-            } else {
-                fileSizeBytes = Math.max(0L, totalBytes);
-            }
-            FLog.d(TAG, "moveToTrash: File '" + originalDisplayName + "' size= " + fileSizeBytes + " bytes (targetExists=" + targetTrashFile.exists() + ", actualLength=" + (targetTrashFile.exists() ? targetTrashFile.length() : "N/A") + ", totalBytes=" + totalBytes + ")");
-            trashItems.add(new TrashItem(videoUri.toString(), originalDisplayName, targetTrashFileName,
-                    System.currentTimeMillis(), isSafSource, fileSizeBytes));
-            if (saveTrashMetadata(context, trashItems)) {
-                FLog.i(TAG, "moveToTrash: Successfully moved and updated metadata for: " + originalDisplayName);
-                return true;
-            } else {
-                FLog.e(TAG, "moveToTrash: File moved/copied, but FAILED to save trash metadata for: "
-                        + originalDisplayName);
-                // Critical error: file is in trash, but not tracked. Attempt to revert by
-                // deleting from trash.
-                if (targetTrashFile.exists() && targetTrashFile.delete()) {
-                    FLog.w(TAG, "moveToTrash: Reverted by deleting untracked file from trash: " + targetTrashFileName);
-                } else {
-                    FLog.e(TAG, "moveToTrash: CRITICAL - Failed to revert untracked file in trash: "
-                            + targetTrashFileName + ". Manual cleanup needed.");
-                }
-                return false;
-            }
-        } else {
-            FLog.e(TAG, "moveToTrash: File operation failed for: " + originalDisplayName);
+            return true;
+        } catch (IOException | RuntimeException e) {
+            FLog.e(TAG, "휴지통 이동을 완료하지 못했습니다.", e);
             return false;
+        } finally {
+            if (saved || (renamed && rollbackLocalMove(targetTrashFile, original))) {
+                new AtomicFile(record).delete();
+            } else if (!renamed && !deletionAttempted) {
+                if (targetCreated) targetTrashFile.delete();
+                new AtomicFile(record).delete();
+            }
+            // On ambiguous deletion or failed rollback, retain the verified copy and journal.
         }
+    }
+
+    interface StreamFactory<T> { T open() throws IOException; }
+
+    private static boolean rollbackLocalMove(File trash, File original) {
+        boolean created = false;
+        boolean complete = false;
+        try {
+            // Reserving the name atomically prevents rollback from overwriting a new original.
+            if (!original.createNewFile()) return false;
+            created = true;
+            long copied = copyClosed(() -> new FileInputStream(trash),
+                    () -> new FileOutputStream(original), trash.length(), null);
+            complete = original.length() == copied;
+            return complete && trash.delete();
+        } catch (IOException | RuntimeException e) {
+            FLog.w(TAG, "휴지통 이동을 원위치로 되돌리지 못했습니다.", e);
+            return false;
+        } finally {
+            if (created && !complete) original.delete();
+        }
+    }
+
+    private static final class RestoreRecord {
+        final TrashItem item;
+        final String destination;
+        final long bytes;
+        RestoreRecord(TrashItem item, Uri destination, long bytes) {
+            this.item = item;
+            this.destination = destination.toString();
+            this.bytes = bytes;
+        }
+    }
+
+    private static File recordRestore(Context context, TrashItem item, Uri destination, long bytes) {
+        File folder = new File(context.getFilesDir(), "trash-restore-journal");
+        if (!folder.isDirectory() && !folder.mkdirs()) return null;
+        File journal = new File(folder, java.util.UUID.randomUUID() + ".json");
+        return writeAtomic(journal, new Gson().toJson(new RestoreRecord(item, destination, bytes))) ? journal : null;
+    }
+
+    static long copyClosed(StreamFactory<InputStream> input, StreamFactory<OutputStream> output,
+            long expected, @Nullable MoveToTrashProgressListener progress) throws IOException {
+        long copied = 0;
+        try (InputStream in = input.open(); OutputStream out = output.open()) {
+            if (in == null || out == null) throw new IOException("파일 스트림을 열 수 없습니다.");
+            byte[] buffer = new byte[8192];
+            int n;
+            while ((n = in.read(buffer)) != -1) {
+                if (n == 0) throw new IOException("복사가 진행되지 않았습니다.");
+                out.write(buffer, 0, n);
+                copied += n;
+                dispatchProgress(progress, copied, expected);
+            }
+            out.flush();
+        }
+        if (expected >= 0 && expected != copied) throw new IOException("사본 크기가 원본과 다릅니다.");
+        return copied;
     }
 
     private static void dispatchProgress(
@@ -402,19 +428,21 @@ public class TrashManager {
 
     private static long getUriSize(@NonNull Context context, @NonNull Uri videoUri) {
         if ("file".equals(videoUri.getScheme())) {
-            return sourceLengthForProgress(videoUri);
+            String path = videoUri.getPath();
+            File source = path == null ? null : new File(path);
+            return source != null && source.isFile() ? source.length() : -1;
         }
         try (android.database.Cursor cursor = context.getContentResolver()
                 .query(videoUri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
             if (cursor != null && cursor.moveToFirst()) {
                 int idx = cursor.getColumnIndex(OpenableColumns.SIZE);
-                if (idx >= 0) {
-                    return Math.max(0L, cursor.getLong(idx));
+                if (idx >= 0 && !cursor.isNull(idx)) {
+                    return cursor.getLong(idx);
                 }
             }
         } catch (Exception ignored) {
         }
-        return 0L;
+        return -1L;
     }
 
     /**
@@ -474,7 +502,7 @@ public class TrashManager {
      * @return true if all specified items were successfully deleted (or didn't
      *         exist), false otherwise.
      */
-    public static boolean permanentlyDeleteItems(Context context, List<TrashItem> itemsToDelete) {
+    public static synchronized boolean permanentlyDeleteItems(Context context, List<TrashItem> itemsToDelete) {
         if (context == null || itemsToDelete == null || itemsToDelete.isEmpty()) {
             FLog.w(TAG, "permanentlyDeleteItems: Context is null, or no items specified for deletion.");
             return true; // Nothing to do, so technically successful.
@@ -510,9 +538,8 @@ public class TrashManager {
                         + item.getTrashFileName());
             }
 
-            // Remove from metadata regardless of file deletion success,
-            // as the intent is to remove it from the trash list.
-            // If file deletion failed, it's an orphaned file, but metadata should be clean.
+            // A failed physical delete must remain visible and retryable.
+            if (!fileDeleted) continue;
             boolean removedFromMeta = updatedMetadata.remove(item);
             if (!removedFromMeta) {
                 FLog.w(TAG, "permanentlyDeleteItems: Item " + item.getOriginalDisplayName()
@@ -538,7 +565,7 @@ public class TrashManager {
      * @param context The application context.
      * @return true if the trash was successfully emptied, false otherwise.
      */
-    public static boolean emptyAllTrash(Context context) {
+    public static synchronized boolean emptyAllTrash(Context context) {
         if (context == null) {
             FLog.e(TAG, "emptyAllTrash: Context is null.");
             return false;
@@ -546,39 +573,27 @@ public class TrashManager {
 
         File trashDir = getTrashDirectory(context);
         if (trashDir == null || !trashDir.exists()) {
-            FLog.w(TAG, "emptyAllTrash: Trash directory doesn't exist or cannot be accessed. Nothing to empty.");
-            // Clear metadata anyway, in case it's out of sync
-            saveTrashMetadata(context, new ArrayList<>());
-            return true;
+            FLog.w(TAG, "휴지통 저장소를 확인하지 못했습니다.");
+            return false;
         }
 
         boolean allFilesDeleted = true;
         File[] files = trashDir.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                if (!deleteRecursively(file)) {
-                    FLog.e(TAG, "emptyAllTrash: Failed to delete path: " + file.getAbsolutePath());
-                    allFilesDeleted = false;
-                }
+        if (files == null) return false;
+        for (File file : files) {
+            if (!deleteRecursively(file)) {
+                FLog.e(TAG, "emptyAllTrash: Failed to delete path: " + file.getAbsolutePath());
+                allFilesDeleted = false;
             }
         }
 
-        // After attempting to delete all files, clear the metadata
+        if (!allFilesDeleted) return false;
         if (!saveTrashMetadata(context, new ArrayList<>())) {
             FLog.e(TAG, "emptyAllTrash: Failed to clear trash metadata after deleting files.");
             return false; // This is a more critical failure
         }
 
-        if (!allFilesDeleted) {
-            FLog.w(TAG,
-                    "emptyAllTrash: Not all files in the trash directory could be deleted, but metadata was cleared.");
-            // Return true because metadata is clear, but log a warning.
-            // The user expectation of an "empty" trash (UI-wise) is met.
-        } else {
-            FLog.i(TAG, "emptyAllTrash: Successfully deleted all files and cleared metadata.");
-        }
-        return true; // Return true if metadata cleared, even if some files failed to delete (they
-                     // are now orphaned)
+        return true;
     }
 
     private static boolean deleteRecursively(File file) {
@@ -616,7 +631,7 @@ public class TrashManager {
      * @return true if all specified items were successfully restored and metadata
      *         updated, false otherwise.
      */
-    public static boolean restoreItemsFromTrash(Context context, List<TrashItem> itemsToRestore) {
+    public static synchronized boolean restoreItemsFromTrash(Context context, List<TrashItem> itemsToRestore) {
         return restoreItemsFromTrash(context, itemsToRestore, RestoreDestination.DOWNLOADS_FOLDER);
     }
 
@@ -631,7 +646,7 @@ public class TrashManager {
      * @return true if all specified items were successfully restored and metadata
      *         updated, false otherwise.
      */
-    public static boolean restoreItemsFromTrash(Context context, List<TrashItem> itemsToRestore,
+    public static synchronized boolean restoreItemsFromTrash(Context context, List<TrashItem> itemsToRestore,
             RestoreDestination destination) {
         if (context == null || itemsToRestore == null || itemsToRestore.isEmpty()) {
             FLog.w(TAG, "restoreItemsFromTrash: Context is null, or no items specified for restoration.");
@@ -678,10 +693,9 @@ public class TrashManager {
 
             File fileInTrash = new File(trashDir, item.getTrashFileName());
             if (!fileInTrash.exists()) {
-                FLog.w(TAG, "restoreItemsFromTrash: File " + item.getTrashFileName()
-                        + " not found in trash. Removing from metadata if present.");
-                updatedMetadata.remove(item);
-                continue; // Cannot restore a non-existent file
+                FLog.w(TAG, "복원할 휴지통 파일을 확인하지 못했습니다.");
+                allSucceeded = false;
+                continue;
             }
 
             // Ensure unique name in target directory (using original display name as base)
@@ -689,49 +703,26 @@ public class TrashManager {
             File restoredFile = new File(targetRestoreDir, restoredFileName);
 
             boolean restoredSuccessfully = false;
+            boolean created = false;
+            boolean complete = false;
             try {
-                // Attempt to move (rename) the file
-                if (fileInTrash.renameTo(restoredFile)) {
-                    FLog.i(TAG, "restoreItemsFromTrash: Successfully MOVED '" + fileInTrash.getName() + "' to '"
-                            + restoredFile.getAbsolutePath() + "'");
-                    restoredSuccessfully = true;
-                } else {
-                    // Fallback to copy-delete if move fails (e.g. different filesystems)
-                    FLog.w(TAG, "restoreItemsFromTrash: Failed to move file directly. Attempting copy-delete for "
-                            + fileInTrash.getName());
-                    try (InputStream in = new FileInputStream(fileInTrash);
-                            OutputStream out = new FileOutputStream(restoredFile)) {
-                        byte[] buf = new byte[8192];
-                        int len;
-                        while ((len = in.read(buf)) > 0) {
-                            out.write(buf, 0, len);
+                created = restoredFile.createNewFile();
+                if (created) {
+                    long copied = copyClosed(() -> new FileInputStream(fileInTrash),
+                            () -> new FileOutputStream(restoredFile), fileInTrash.length(), null);
+                    if (restoredFile.length() == copied) {
+                        File journal = recordRestore(context, item, Uri.fromFile(restoredFile), copied);
+                        complete = journal != null;
+                        if (complete) {
+                            restoredSuccessfully = fileInTrash.delete();
+                            if (!restoredSuccessfully) new AtomicFile(journal).delete();
                         }
-                        FLog.i(TAG, "restoreItemsFromTrash: Successfully COPIED '" + fileInTrash.getName() + "' to '"
-                                + restoredFile.getAbsolutePath() + "'");
-                        if (fileInTrash.delete()) {
-                            FLog.d(TAG, "restoreItemsFromTrash: Successfully deleted original from trash after copy.");
-                            restoredSuccessfully = true;
-                        } else {
-                            FLog.e(TAG, "restoreItemsFromTrash: Copied file but FAILED to delete original from trash: "
-                                    + fileInTrash.getName());
-                            // File is restored, but also still in trash. Metadata will remove it from trash
-                            // list.
-                            // This is acceptable, a manual cleanup of the trash dir might be needed later
-                            // for this file.
-                            restoredSuccessfully = true; // Consider it restored for metadata purposes
-                        }
-                    } catch (IOException copyEx) {
-                        FLog.e(TAG, "restoreItemsFromTrash: IOException during copy-delete for " + fileInTrash.getName(),
-                                copyEx);
-                        if (restoredFile.exists())
-                            restoredFile.delete(); // Clean up partial copy
-                        allSucceeded = false;
                     }
                 }
-            } catch (SecurityException se) {
-                FLog.e(TAG, "restoreItemsFromTrash: SecurityException during file operation for " + fileInTrash.getName()
-                        + ". Check permissions for target dir: " + targetRestoreDir.getAbsolutePath(), se);
-                allSucceeded = false;
+            } catch (IOException | RuntimeException e) {
+                FLog.e(TAG, "휴지통 파일을 복원하지 못했습니다.", e);
+            } finally {
+                if (created && !complete) restoredFile.delete();
             }
 
             if (restoredSuccessfully) {
@@ -816,9 +807,8 @@ public class TrashManager {
 
             File fileInTrash = new File(trashDir, item.getTrashFileName());
             if (!fileInTrash.exists()) {
-                FLog.w(TAG, "restoreItemsToSaf: File " + item.getTrashFileName()
-                        + " not found in trash. Removing from metadata if present.");
-                updatedMetadata.remove(item);
+                FLog.w(TAG, "복원할 휴지통 파일을 확인하지 못했습니다.");
+                allSucceeded = false;
                 continue;
             }
 
@@ -826,60 +816,36 @@ public class TrashManager {
             String targetFileName = getUniqueSafFileName(safDir, item.getOriginalDisplayName());
             String mimeType = getMimeTypeForFile(targetFileName);
 
+            DocumentFile newDoc = null;
+            boolean complete = false;
             try {
-                // Create the document in the SAF directory
-                DocumentFile newDoc = safDir.createFile(mimeType, targetFileName);
+                newDoc = safDir.createFile(mimeType, targetFileName);
                 if (newDoc == null) {
-                    FLog.e(TAG, "restoreItemsToSaf: Failed to create document in SAF for: " + targetFileName);
                     allSucceeded = false;
                     continue;
                 }
-
-                // Copy content from trash file to new SAF document
-                try (InputStream in = new FileInputStream(fileInTrash);
-                     OutputStream out = context.getContentResolver().openOutputStream(newDoc.getUri())) {
-                    if (out == null) {
-                        FLog.e(TAG, "restoreItemsToSaf: Failed to open output stream for SAF document: " + newDoc.getUri());
-                        newDoc.delete(); // Clean up the empty document
-                        allSucceeded = false;
-                        continue;
-                    }
-                    byte[] buf = new byte[8192];
-                    int len;
-                    while ((len = in.read(buf)) > 0) {
-                        out.write(buf, 0, len);
-                    }
-                    out.flush();
+                Uri target = newDoc.getUri();
+                long copied = copyClosed(() -> new FileInputStream(fileInTrash),
+                        () -> context.getContentResolver().openOutputStream(target), fileInTrash.length(), null);
+                long stored = getUriSize(context, target);
+                if (stored >= 0 && stored != copied) throw new IOException("복원한 사본 크기 불일치");
+                File journal = recordRestore(context, item, target, copied);
+                if (journal == null) throw new IOException("복원 진행 기록을 저장하지 못했습니다.");
+                complete = true;
+                if (!fileInTrash.delete()) {
+                    new AtomicFile(journal).delete();
+                    allSucceeded = false;
+                    continue;
                 }
-
-                FLog.i(TAG, "restoreItemsToSaf: Successfully copied '" + fileInTrash.getName()
-                        + "' to SAF: " + newDoc.getUri());
-
-                // Delete the file from trash
-                if (fileInTrash.delete()) {
-                    FLog.d(TAG, "restoreItemsToSaf: Deleted original from trash after SAF copy.");
-                } else {
-                    FLog.w(TAG, "restoreItemsToSaf: Failed to delete original from trash: "
-                            + fileInTrash.getName() + " (SAF copy succeeded, treating as restored).");
-                }
-
-                // Remove from metadata
-                boolean removedFromMeta = updatedMetadata.remove(item);
-                if (!removedFromMeta) {
-                    FLog.w(TAG, "restoreItemsToSaf: Item " + item.getOriginalDisplayName()
-                            + " not found in metadata during restoration.");
-                } else {
-                    FLog.d(TAG, "restoreItemsToSaf: Item " + item.getOriginalDisplayName()
-                            + " removed from trash metadata after SAF restoration.");
-                }
-
-            } catch (IOException e) {
-                FLog.e(TAG, "restoreItemsToSaf: IOException restoring " + item.getOriginalDisplayName(), e);
+                updatedMetadata.remove(item);
+            } catch (IOException | RuntimeException e) {
+                FLog.e(TAG, "휴지통 파일을 저장 위치에 복원하지 못했습니다.", e);
                 allSucceeded = false;
-            } catch (SecurityException e) {
-                FLog.e(TAG, "restoreItemsToSaf: SecurityException restoring " + item.getOriginalDisplayName()
-                        + ". SAF permission may have been revoked.", e);
-                allSucceeded = false;
+            } finally {
+                if (newDoc != null && !complete) {
+                    try { newDoc.delete(); }
+                    catch (RuntimeException e) { FLog.w(TAG, "불완전한 복원 사본을 정리하지 못했습니다.", e); }
+                }
             }
         }
 
@@ -1145,9 +1111,7 @@ public class TrashManager {
                     fileExistedAndDeleted = true;
                 } else {
                     FLog.e(TAG, "Failed to permanently delete file: " + item.getTrashFileName());
-                    // If file deletion fails, we might choose not to remove from metadata
-                    // to allow another attempt or manual intervention. For now, continue to remove
-                    // from metadata.
+                    continue; // Preserve the entry for retry.
                 }
             } else {
                 FLog.w(TAG, "File to delete not found on disk: " + item.getTrashFileName()

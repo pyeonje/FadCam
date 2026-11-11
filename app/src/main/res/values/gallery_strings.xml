@@ -12,4 +12,9 @@
     <string name="gallery_yesterday">Yesterday</string>
     <string name="gallery_other">Other</string>
     <string name="gallery_file_actions">File options</string>
+    <string name="gallery_mini_apps">Mini Apps</string>
+    <plurals name="gallery_selected_count">
+        <item quantity="one">%d selected</item>
+        <item quantity="other">%d selected</item>
+    </plurals>
 </resources>

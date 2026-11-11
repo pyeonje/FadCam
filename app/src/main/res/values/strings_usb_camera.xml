@@ -13,4 +13,13 @@
     <string name="usb_camera_saved">Photo saved in FadCam gallery</string>
     <string name="usb_camera_photo_failed">Could not save photo</string>
     <string name="usb_camera_modes">Resolution / frame rate</string>
+    <string name="usb_camera_unknown_device">USB camera</string>
+    <string name="usb_camera_allow_camera">Allow camera access</string>
+    <string name="usb_camera_retry">Retry connection</string>
+    <string name="usb_camera_camera_required">Camera permission is required to use the USB camera</string>
+    <string name="usb_camera_camera_denied">Camera permission was not granted</string>
+    <string name="usb_camera_focus_unavailable">Focus adjustment unavailable</string>
+    <string name="usb_camera_manual_focus">Manual focus</string>
+    <string name="usb_camera_switch_to_mf">Auto focus. Switch to manual focus</string>
+    <string name="usb_camera_switch_to_af">Manual focus. Switch to auto focus</string>
 </resources>

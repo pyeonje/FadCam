@@ -49,7 +49,7 @@ public final class PlayerHolder {
     private SeekableFragmentedMp4MediaSourceFactory fmp4SourceFactory;
     private Context appContext;
 
-    private PlayerHolder() {}
+    private PlayerHolder() { preparationExecutor.allowCoreThreadTimeOut(true); }
 
     public static synchronized PlayerHolder getInstance() {
         if (instance == null) instance = new PlayerHolder();
@@ -236,83 +236,78 @@ public final class PlayerHolder {
         return player;
     }
 
-    public synchronized void setMediaIfNeeded(Uri uri) {
-        if (player == null || uri == null) {
-            FLog.w(TAG, "setMediaIfNeeded called with null player or uri. player=" + player + ", uri=" + uri);
+    // Let the next selection proceed past one slow provider. Superseded queued reads never open it.
+    private final java.util.concurrent.ThreadPoolExecutor preparationExecutor =
+            new java.util.concurrent.ThreadPoolExecutor(2, 2, 20L,
+                    java.util.concurrent.TimeUnit.MILLISECONDS,
+                    new java.util.concurrent.ArrayBlockingQueue<>(1),
+                    new java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy());
+    private long preparationGeneration;
+    private Uri preparedUri;
+
+    public void setMediaIfNeeded(Uri uri) {
+        setMediaIfNeeded(uri, () -> true);
+    }
+
+    public void setMediaIfNeeded(Uri uri, java.util.function.BooleanSupplier ownerIsCurrent) {
+        final ExoPlayer owner;
+        synchronized (this) { owner = player; }
+        if (owner == null || uri == null) return;
+        android.os.Handler handler = new android.os.Handler(owner.getApplicationLooper());
+        if (android.os.Looper.myLooper() != owner.getApplicationLooper()) {
+            handler.post(() -> enqueueMedia(owner, uri, ownerIsCurrent, handler));
+        } else {
+            enqueueMedia(owner, uri, ownerIsCurrent, handler);
+        }
+    }
+
+    private synchronized void enqueueMedia(ExoPlayer owner, Uri uri,
+            java.util.function.BooleanSupplier ownerIsCurrent, android.os.Handler handler) {
+        if (player != owner || !ownerIsCurrent.getAsBoolean()) return;
+        boolean same = uri.equals(currentUri) && owner.getMediaItemCount() > 0;
+        String title = uri.getLastPathSegment();
+        MediaItem item = new MediaItem.Builder().setUri(uri)
+                .setMediaMetadata(new MediaMetadata.Builder().setTitle(title).build()).build();
+        long generation = ++preparationGeneration;
+        preparationExecutor.getQueue().clear();
+        currentUri = uri;
+        // Install the correct item immediately so initial seek/play commands target it.
+        // The indexed source replaces it once ready, carrying forward the current intent.
+        if (!same) {
+            owner.setMediaItem(item);
+            preparedUri = null;
+        }
+        owner.setVolume(1.0f);
+        SeekableFragmentedMp4MediaSourceFactory factory = fmp4SourceFactory;
+        if (factory == null) {
+            if (!same) owner.prepare();
             return;
         }
-        
-        FLog.d(TAG, "=== setMediaIfNeeded START ===");
-        FLog.d(TAG, "URI: " + uri);
-        FLog.d(TAG, "Current URI: " + currentUri);
-        FLog.d(TAG, "Media item count: " + player.getMediaItemCount());
-        
-        // Check if this is a fragmented MP4 - always rebuild index since file might have changed
-        boolean isFmp4 = fmp4SourceFactory != null && fmp4SourceFactory.isFragmentedMp4(uri);
-        FLog.i(TAG, "fMP4 detection: isFmp4=" + isFmp4 + ", scheme=" + uri.getScheme());
-        
-        // For fMP4, always rebuild index. File content may change (new recording with same name,
-        // or file was still being recorded when first opened). Index scan is fast (~5ms).
-        // For other formats, only set media if URI changed or no media is loaded.
-        boolean shouldSetMedia = currentUri == null || !uri.equals(currentUri) || 
-                                 player.getMediaItemCount() == 0 || isFmp4;
-        
-        if (shouldSetMedia) {
-            if (isFmp4) {
-                FLog.d(TAG, "Setting fMP4 media (always rebuild index for accurate duration)");
-            } else {
-                FLog.d(TAG, "Setting new media (URI changed or empty)");
+        boolean alreadyPrepared = uri.equals(preparedUri);
+        preparationExecutor.execute(() -> {
+            MediaSource prepared;
+            try {
+                if (alreadyPrepared && !factory.isFragmentedMp4(uri)) return;
+                prepared = factory.createMediaSource(item);
+            } catch (RuntimeException e) {
+                FLog.w(TAG, "Failed to prepare indexed playback source", e);
+                handler.post(() -> applyPreparedSource(owner, generation, uri, ownerIsCurrent, null));
+                return;
             }
-            
-            // Build MediaItem with metadata
-            String title = null;
-            try { 
-                title = uri.getLastPathSegment(); 
-            } catch (Exception ignored) {}
-            
-            MediaItem item;
-            if (title != null && !title.isEmpty()) {
-                MediaMetadata md = new MediaMetadata.Builder().setTitle(title).build();
-                item = new MediaItem.Builder().setUri(uri).setMediaMetadata(md).build();
-            } else {
-                item = MediaItem.fromUri(uri);
-            }
-            
-            // Always use our SeekableFragmentedMp4MediaSourceFactory — it handles
-            // both fMP4 (with fragment index) and standard MP4 (with ClippingMediaSource
-            // for correct duration-based seeking). The default ProgressiveMediaSource
-            // fails for standard MP4 files with broken moov atoms (Faditor-converted).
-            boolean usedFmp4Factory = false;
-            if (fmp4SourceFactory != null) {
-                try {
-                    MediaSource mediaSource = fmp4SourceFactory.createMediaSource(item);
-                    player.setMediaSource(mediaSource);
-                    FLog.d(TAG, "MediaSource created via SeekableFmp4Factory");
-                    usedFmp4Factory = true;
-                } catch (Exception e) {
-                    FLog.w(TAG, "Failed to create MediaSource via factory, falling back", e);
-                }
-            }
-            
-            if (!usedFmp4Factory) {
-                FLog.d(TAG, "Using default MediaItem for playback");
-                player.setMediaItem(item);
-            }
-            
-            currentUri = uri;
-            
-            FLog.d(TAG, "Calling player.prepare()");
-            player.prepare();
-            
-            FLog.d(TAG, "Media set and prepared");
-        } else {
-            FLog.d(TAG, "Media already set for this URI, skipping");
-        }
-        
-        // Always ensure volume is max
-        player.setVolume(1.0f);
-        FLog.d(TAG, "Volume set to 1.0, audio session ID: " + player.getAudioSessionId());
-        FLog.d(TAG, "=== setMediaIfNeeded END ===");
+            handler.post(() -> applyPreparedSource(owner, generation, uri, ownerIsCurrent, prepared));
+        });
+    }
+
+    private synchronized void applyPreparedSource(ExoPlayer owner, long generation, Uri uri,
+            java.util.function.BooleanSupplier ownerIsCurrent, MediaSource source) {
+        if (player != owner || generation != preparationGeneration || !uri.equals(currentUri)
+                || !ownerIsCurrent.getAsBoolean()) return;
+        long position = owner.getCurrentPosition();
+        boolean playWhenReady = owner.getPlayWhenReady();
+        if (source != null) owner.setMediaSource(source, position);
+        owner.prepare();
+        preparedUri = uri;
+        owner.setPlayWhenReady(playWhenReady);
     }
 
     public synchronized Uri getCurrentUri() { return currentUri; }
@@ -346,6 +341,9 @@ public final class PlayerHolder {
     }
 
     public synchronized void release() {
+        preparationGeneration++;
+        preparedUri = null;
+        preparationExecutor.getQueue().clear();
         if (player != null) {
             try { player.release(); } catch (Exception ignored) {}
             player = null;

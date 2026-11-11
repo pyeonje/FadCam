@@ -39,4 +39,46 @@ public class UsbCameraIntegrationTest {
     @Test public void unsupportedFocusIsDisabledAndLeavingInvalidatesQueuedWrites(){
         ActivityController<UsbCameraActivity> c=Robolectric.buildActivity(UsbCameraActivity.class).setup();UsbCameraActivity a=c.get();ReflectionHelpers.setField(a,"streaming",true);a.bindFocus(new UsbCameraBackend.FocusState(false,false,false,0));android.widget.SeekBar focus=ReflectionHelpers.getField(a,"focus");android.widget.Button auto=ReflectionHelpers.getField(a,"auto");assertFalse(focus.isEnabled());assertFalse(auto.isEnabled());int before=ReflectionHelpers.getField(a,"generation");a.stopSession();assertTrue((int)ReflectionHelpers.getField(a,"generation")>before);assertFalse((boolean)ReflectionHelpers.getField(a,"streaming"));c.pause().stop().destroy();
     }
+    @Test public void obsoleteUsbPermissionResultDoesNotReplaceCurrentDeviceStatus(){
+        ActivityController<UsbCameraActivity> c=Robolectric.buildActivity(UsbCameraActivity.class).setup();
+        UsbCameraActivity a=c.get();
+        try {
+            UsbDevice current=mock(UsbDevice.class), old=mock(UsbDevice.class);
+            when(current.getDeviceName()).thenReturn("current");when(old.getDeviceName()).thenReturn("old");
+            UsbManager manager=mock(UsbManager.class);ReflectionHelpers.setField(a,"usb",manager);ReflectionHelpers.setField(a,"selected",current);
+            android.widget.TextView status=ReflectionHelpers.getField(a,"status");status.setText("current-device-status");
+            BroadcastReceiver receiver=ReflectionHelpers.getField(a,"receiver");
+            receiver.onReceive(a,new Intent(a.getPackageName()+".USB_CAMERA_PERMISSION")
+                    .putExtra(UsbManager.EXTRA_DEVICE,old).putExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false));
+            assertEquals("current-device-status",status.getText().toString());
+            verify(manager,never()).openDevice(any());
+        } finally { c.pause().stop().destroy(); }
+    }
+    @Test public void lastAutoFocusCancelsManualWriteWaitingBehindInFlightManual(){
+        ActivityController<UsbCameraActivity> c=Robolectric.buildActivity(UsbCameraActivity.class).setup();
+        UsbCameraActivity a=c.get();
+        try {
+            ArrayDeque<Runnable> queued=new ArrayDeque<>();
+            Handler dispatcher=mock(Handler.class);when(dispatcher.post(any(Runnable.class))).thenAnswer(call->queued.offer(call.getArgument(0)));
+            UsbCameraBackend backend=mock(UsbCameraBackend.class);
+            when(backend.setFocus(anyInt())).thenAnswer(call->new UsbCameraBackend.FocusState(true,true,false,call.getArgument(0)));
+            when(backend.setAutoFocus(true)).thenReturn(new UsbCameraBackend.FocusState(true,true,true,200));
+            ReflectionHelpers.setField(a,"worker",dispatcher);ReflectionHelpers.setField(a,"backend",backend);
+            ReflectionHelpers.setField(a,"streaming",true);a.bindFocus(new UsbCameraBackend.FocusState(true,true,false,200));
+            android.widget.SeekBar focus=ReflectionHelpers.getField(a,"focus");
+            android.widget.SeekBar.OnSeekBarChangeListener listener=ReflectionHelpers.getField(focus,"mOnSeekBarChangeListener");
+            android.widget.Button auto=ReflectionHelpers.getField(a,"auto");
+            when(backend.setFocus(400)).thenAnswer(call->{
+                listener.onProgressChanged(focus,700,true);
+                auto.performClick();
+                return new UsbCameraBackend.FocusState(true,true,false,400);
+            });
+            listener.onProgressChanged(focus,400,true);listener.onStopTrackingTouch(focus);
+            for(int n=0;!queued.isEmpty()&&n<10;n++){
+                queued.remove().run();Shadows.shadowOf(Looper.getMainLooper()).idle();
+            }
+            verify(backend).setFocus(400);verify(backend).setAutoFocus(true);verify(backend,never()).setFocus(700);
+            assertEquals("AF",auto.getText().toString());
+        } finally { c.pause().stop().destroy(); }
+    }
 }

@@ -90,8 +90,12 @@ public class VideoIndexRepository {
     }
 
     private VideoIndexRepository(@NonNull Context context) {
+        this(context, VideoIndexDatabase.getInstance(context.getApplicationContext()).videoIndexDao());
+    }
+
+    VideoIndexRepository(Context context, VideoIndexDao dao) {
         this.appContext = context.getApplicationContext();
-        this.dao = VideoIndexDatabase.getInstance(appContext).videoIndexDao();
+        this.dao = dao;
         this.scanner = new FastFileScanner(appContext);
         this.enrichmentExecutor = Executors.newFixedThreadPool(2);
     }
@@ -148,7 +152,7 @@ public class VideoIndexRepository {
 
         // Cold start: full scan + insert
         FLog.i(TAG, "Cold start: no DB data, performing full scan");
-        List<VideoIndexEntity> scanned = scanner.scanAll(prefs);
+        List<VideoIndexEntity> scanned = scan(prefs).files;
         if (!scanned.isEmpty()) {
             dao.insertOrReplaceAll(scanned);
             FLog.i(TAG, "Inserted " + scanned.size() + " items into DB");
@@ -201,11 +205,21 @@ public class VideoIndexRepository {
      * @return Updated list of VideoItem after delta sync
      */
     @NonNull
-    public List<VideoItem> deltaScan(@NonNull SharedPreferencesManager prefs) {
+    private FastFileScanner.ScanResult scan(SharedPreferencesManager prefs) {
+        FastFileScanner.ScanResult result = scanner.scanWithStatus(prefs);
+        if (!result.failedScopes.isEmpty()) indexInvalidated.set(true);
+        return result;
+    }
+
+    public synchronized List<VideoItem> deltaScan(@NonNull SharedPreferencesManager prefs) {
+        return reconcile(scan(prefs));
+    }
+
+    List<VideoItem> reconcile(FastFileScanner.ScanResult result) {
         long start = System.currentTimeMillis();
 
         // Scan current files on disk
-        List<VideoIndexEntity> currentFiles = scanner.scanAll(prefs);
+        List<VideoIndexEntity> currentFiles = result.files;
 
         // Build lookup maps
         Map<String, VideoIndexEntity> diskMap = new HashMap<>(currentFiles.size());
@@ -241,7 +255,7 @@ public class VideoIndexRepository {
 
         // Deleted files — in DB but not on disk
         for (String dbUri : dbUris) {
-            if (!diskMap.containsKey(dbUri)) {
+            if (!diskMap.containsKey(dbUri) && result.coversMissing(dbUri)) {
                 toDelete.add(dbUri);
             }
         }
@@ -277,46 +291,7 @@ public class VideoIndexRepository {
      */
     @NonNull
     public List<VideoItem> forceFullReindex(@NonNull SharedPreferencesManager prefs) {
-        long start = System.currentTimeMillis();
-
-        // Save existing enrichment data before modifying the DB
-        Map<String, long[]> enrichmentData = new HashMap<>();
-        try {
-            List<VideoIndexEntity> existing = dao.getAllNewestFirst();
-            for (VideoIndexEntity e : existing) {
-                if (e.durationResolved) {
-                    enrichmentData.put(e.uriString, new long[]{e.durationMs, 1});
-                }
-            }
-            FLog.d(TAG, "Preserved enrichment data for " + enrichmentData.size() + " items");
-        } catch (Exception e) {
-            FLog.w(TAG, "Failed to read existing enrichment data (non-fatal)", e);
-        }
-
-        // Wipe and re-scan
-        dao.deleteAll();
-        List<VideoIndexEntity> scanned = scanner.scanAll(prefs);
-
-        // Apply preserved enrichment data to matching URIs
-        if (!enrichmentData.isEmpty()) {
-            for (VideoIndexEntity entity : scanned) {
-                long[] saved = enrichmentData.get(entity.uriString);
-                if (saved != null) {
-                    entity.durationMs = saved[0];
-                    entity.durationResolved = true;
-                }
-            }
-        }
-
-        if (!scanned.isEmpty()) {
-            dao.insertOrReplaceAll(scanned);
-        }
-        List<VideoItem> items = entitiesToVideoItems(scanned);
-        updateInMemoryCaches(scanned, items.size());
-        long elapsed = System.currentTimeMillis() - start;
-        FLog.i(TAG, "Full reindex: " + items.size() + " items in " + elapsed + "ms"
-                + " (preserved " + enrichmentData.size() + " durations)");
-        return items;
+        return deltaScan(prefs);
     }
 
     // ════════════════════════════════════════════════════════════════

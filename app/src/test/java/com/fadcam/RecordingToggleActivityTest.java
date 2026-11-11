@@ -64,6 +64,30 @@ public class RecordingToggleActivityTest {
         assertEquals(Constants.INTENT_ACTION_STOP_RECORDING, stopped.getAction());
     }
 
+    @Test public void calendarShortcutStartsOnlySilentVideoWithMicrophoneDenied() {
+        var app = RuntimeEnvironment.getApplication();
+        Shadows.shadowOf(app).grantPermissions(android.Manifest.permission.CAMERA);
+        Shadows.shadowOf(app).denyPermissions(android.Manifest.permission.RECORD_AUDIO);
+        var prefs = SharedPreferencesManager.getInstance(app);
+        prefs.sharedPreferences.edit().putBoolean(Constants.COMPLETED_ONBOARDING_KEY, true)
+                .putString(Constants.PREF_CAMERA_SELECTION, CameraType.FRONT.name()).commit();
+        prefs.setRecordAudioEnabled(false);
+        var calendar = Robolectric.buildActivity(PersonalRecordingStartActivity.class).create().get();
+        Intent next = Shadows.shadowOf(calendar).getNextStartedActivity();
+        assertNotNull(next);
+        var start = Robolectric.buildActivity(RecordingStartActivity.class, next).create().get();
+        assertNull(Shadows.shadowOf(start).getNextStartedActivity());
+        Intent service = Shadows.shadowOf(app).getNextStartedService();
+        assertNotNull(service);
+        assertEquals(Constants.INTENT_ACTION_START_RECORDING, service.getAction());
+        assertEquals(CameraType.FRONT, prefs.getCameraSelection());
+        assertFalse(prefs.isRecordAudioEnabled());
+        prefs.setRecordAudioEnabled(true);
+        var denied = Robolectric.buildActivity(RecordingStartActivity.class, next).create().get();
+        assertNotNull(Shadows.shadowOf(denied).getNextStartedActivity());
+        assertNull(Shadows.shadowOf(app).getNextStartedService());
+    }
+
     @Test public void pausedDualSessionRoutesToItsOwnServiceEvenWithDifferentSavedCamera() {
         DualCameraRecordingService service = Robolectric.buildService(DualCameraRecordingService.class).get();
         ReflectionHelpers.setField(service, "state", DualCameraState.PAUSED);

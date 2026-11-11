@@ -45,7 +45,6 @@ public class FragmentedMp4MuxerWrapper {
     // is exactly the "FileDescriptor is INVALID — skipping write" flood and the
     // 0-byte split segments on some devices (Samsung SAF especially).
     private final Object ioLock = new Object();
-    private int invalidFdLogCount = 0;
     private boolean started = false;
     private boolean released = false;
     private int orientationHint = 0;
@@ -99,6 +98,37 @@ public class FragmentedMp4MuxerWrapper {
     private String lastFinalizeOutcome = "never ran";
 
     /** Bounded AVC corruption tracing (first fragment only, non-flooding). */
+    private long committedOutputEnd;
+    private android.system.StructStat outputIdentity;
+    private IOException outputFailure;
+    private boolean writerClosed;
+
+    private static android.system.StructStat stat(FileOutputStream stream) {
+        try { return android.system.Os.fstat(stream.getFD()); }
+        catch (Exception failure) { return null; }
+    }
+
+    private boolean ownsOutput(FileOutputStream stream) {
+        try { return ownsOutput(stream.getFD()); }
+        catch (IOException failure) { return false; }
+    }
+
+    private boolean ownsOutput(FileDescriptor fd) {
+        android.system.StructStat candidate;
+        try { candidate = android.system.Os.fstat(fd); }
+        catch (Exception failure) { return false; }
+        return outputIdentity != null && candidate != null && outputIdentity.st_ino != 0
+                && candidate.st_ino == outputIdentity.st_ino
+                && candidate.st_dev == outputIdentity.st_dev;
+    }
+
+    private void closeWriter() throws MuxerException {
+        if (!writerClosed) {
+            writerClosed = true;
+            muxer.close();
+        }
+    }
+
     private boolean firstMediaFragmentLogged = false;
 
     /**
@@ -109,6 +139,7 @@ public class FragmentedMp4MuxerWrapper {
      */
     public FragmentedMp4MuxerWrapper(@NonNull String path) throws IOException {
         this.fileOutputStream = new FileOutputStream(path);
+        outputIdentity = stat(fileOutputStream);
         this.outputPath = path;
         
         // Create callback consumer for live streaming integration
@@ -135,6 +166,7 @@ public class FragmentedMp4MuxerWrapper {
      */
     public FragmentedMp4MuxerWrapper(@NonNull FileDescriptor fd) throws IOException {
         this.fileOutputStream = new FileOutputStream(fd);
+        outputIdentity = stat(fileOutputStream);
         // Verify the fd is valid immediately after wrapping it. If this logs a warning, the
         // ParcelFileDescriptor was already invalid when the new muxer was constructed, which
         // means the old PFD was closed too late (or the SAF provider returned a bad fd).
@@ -373,25 +405,13 @@ public class FragmentedMp4MuxerWrapper {
             }
 
             try {
-                // Media3's FragmentedMp4Muxer.close() automatically creates the final fragment
-                // and finalizes all track durations. No need to manually write EOS samples.
-                try {
-                    muxer.close();
-                } catch (MuxerException e) {
-                    // ROOT-CAUSE FIX (#332): a close() failure must NOT skip finalization —
-                    // the media data on disk may still be perfectly recoverable.
-                    FLog.e(TAG, "Error closing media3 muxer — proceeding with hybrid finalization attempt", e);
-                }
+                closeWriter();
+                if (outputFailure != null) throw outputFailure;
                 performHybridFinalization();
+            } catch (IOException | MuxerException e) {
+                throw new IllegalStateException("녹화 파일을 완전히 저장하지 못했습니다.", e);
+            } finally {
                 started = false;
-                FLog.d(TAG, "Muxer stopped successfully");
-                FLog.d(TAG, "Recording telemetry: fragments=" + fragmentPositions.size()
-                        + " | finalize=" + lastFinalizeOutcome
-                        + " | writeFailures=" + segmentWriteFailures
-                        + " | streamReopens=" + streamReopenCount);
-            } catch (RuntimeException e) {
-                FLog.e(TAG, "Error stopping muxer", e);
-                throw e;
             }
         }
     }
@@ -408,20 +428,19 @@ public class FragmentedMp4MuxerWrapper {
             if (released) {
                 return;
             }
-            released = true;
-
             try {
-                if (started) {
-                    try {
-                        muxer.close();
-                    } catch (MuxerException e) {
-                        FLog.e(TAG, "Error closing muxer", e);
-                    }
+                try {
+                    closeWriter();
+                } catch (MuxerException | RuntimeException e) {
+                    FLog.e(TAG, "Error closing muxer", e);
+                } finally {
+                    started = false;
                 }
                 // CRITICAL: Flush BEFORE closing to ensure all data (including moov box) is written to disk.
                 // Under ioLock: waits for any in-flight writer-thread callback to finish its write,
                 // then closes — no write can ever hit an invalid fd.
                 synchronized (ioLock) {
+                    released = true;
                     try {
                         fileOutputStream.flush();
                         FLog.d(TAG, "FileOutputStream flushed successfully");
@@ -701,19 +720,27 @@ public class FragmentedMp4MuxerWrapper {
             int t = readIntBE(initSegmentData, pos + 4);
             if (s < 8 || pos + s > end) break;
             if (t == 0x6D6F6F76) { // 'moov'
-                // mvhd is the first child of moov; duration sits at byte 24
-                // inside mvhd (version 0) or 32 (version 1).
                 int mvhdPos = pos + 8;
+                if (mvhdPos + 12 > pos + s || readIntBE(initSegmentData, mvhdPos + 4) != 0x6d766864) {
+                    throw new IOException("영상 길이 정보를 찾을 수 없습니다.");
+                }
                 int ver = initSegmentData[mvhdPos + 8] & 0xFF;
-                long durationOffset = initSegmentFilePosition + mvhdPos + 24L
-                        + (ver == 1 ? 4L : 0L);
-                // Compute duration in mvhd timescale units (timescale = 10000)
-                int durationVu = (int)(cumulativeDurationUs * 10000L / 1_000_000L);
-                java.nio.ByteBuffer patch = java.nio.ByteBuffer.allocate(4);
-                patch.putInt(durationVu);
+                int fieldOffset = ver == 1 ? 32 : 24;
+                int fieldSize = ver == 1 ? 8 : 4;
+                if (ver > 1 || mvhdPos + fieldOffset + fieldSize > pos + s
+                        || readIntBE(initSegmentData, mvhdPos) < fieldOffset + fieldSize) {
+                    throw new IOException("영상 길이 정보가 올바르지 않습니다.");
+                }
+                long durationOffset = initSegmentFilePosition + mvhdPos + fieldOffset;
+                long scale = Integer.toUnsignedLong(readIntBE(initSegmentData, mvhdPos + fieldOffset - 4));
+                long duration = cumulativeDurationUs / 1_000_000L * scale
+                        + cumulativeDurationUs % 1_000_000L * scale / 1_000_000L;
+                ByteBuffer patch = ByteBuffer.allocate(fieldSize);
+                if (ver == 1) patch.putLong(duration);
+                else patch.putInt((int) Math.min(duration, 0xffff_ffffL));
                 patch.flip();
                 channel.position(durationOffset);
-                channel.write(patch);
+                writeFully(channel, patch);
                 FLog.i(TAG, "Patched mvhd.duration at offset " + durationOffset
                         + " (ver=" + ver + ") to " + cumulativeDurationUs + "us ("
                         + (cumulativeDurationUs / 1000000.0) + "s)");
@@ -797,7 +824,7 @@ public class FragmentedMp4MuxerWrapper {
      * (path or SAF re-opener) and redo the finalization. The media data is
      * already on disk — only the stale handle was broken.
      */
-    private void performHybridFinalization() {
+    private void performHybridFinalization() throws IOException {
         FLog.d(TAG, "performHybridFinalization START — fragments=" + fragmentPositions.size());
         if (fragmentPositions.isEmpty() || initSegmentData == null || fileOutputStream == null) {
             String msg = "SKIPPED — fragments=" + fragmentPositions.size()
@@ -805,6 +832,12 @@ public class FragmentedMp4MuxerWrapper {
                     + " stream=" + (fileOutputStream != null) + " | fMP4 left intact";
             FLog.w(TAG, "performHybridFinalization " + msg);
             lastFinalizeOutcome = msg;
+            RemoteStreamManager stream = RemoteStreamManager.getInstance();
+            boolean streamOnly = stream.isStreamingEnabled()
+                    && stream.getStreamingMode() == RemoteStreamManager.StreamingMode.STREAM_ONLY;
+            if (!streamOnly || committedOutputEnd != 0) {
+                throw new IOException("저장할 수 있는 완전한 녹화 조각이 없습니다.");
+            }
             return;
         }
         logFileState("before finalization");
@@ -857,18 +890,22 @@ public class FragmentedMp4MuxerWrapper {
             } catch (Exception e2) {
                 lastFinalizeOutcome = "FAILED on re-opened channel: " + e2.getMessage();
                 logFinalizationFailure(e2, "re-opened channel");
+                throw new IOException("최종 저장 재시도에 실패했습니다.", e2);
             } finally {
                 closeQuietly(fresh);
             }
         } else {
             lastFinalizeOutcome = "FAILED on original channel, re-open unavailable";
             logFinalizationFailure(null, "original channel (fresh re-open unavailable)");
+            throw new IOException("녹화 출력을 다시 열 수 없습니다.");
         }
     }
 
     /** Performs the moov-append + mdat-header patch on the given channel. */
     private void finalizeWithChannel(java.nio.channels.FileChannel ch) throws IOException {
-        patchMvhdDuration(ch);
+        if (ch.size() < committedOutputEnd) throw new IOException("녹화 파일이 짧습니다.");
+        // Retry always writes the same moov location; never append a second copy.
+        ch.truncate(committedOutputEnd);
         java.util.List<Long> aOff = new java.util.ArrayList<>();
         java.util.List<Integer> aCnt = new java.util.ArrayList<>();
         java.util.List<Long> vOff = new java.util.ArrayList<>();
@@ -883,28 +920,45 @@ public class FragmentedMp4MuxerWrapper {
             if (vcnt > 0 && voff > 0) { vOff.add(fragPos + voff); vCnt.add(vcnt); }
         }
         java.nio.ByteBuffer moov = muxer.buildFinalMoov(aOff, aCnt, vOff, vCnt);
-        long moovPos = ch.size();
+        long moovPos = committedOutputEnd;
         int moovSize = moov.remaining();
-        ch.position(moovPos);
-        ch.write(moov);
-        // Overwrite the 16-byte free box with a 16-byte mdat header
-        // (size=1 + 64-bit largesize — valid for ANY file size). Writing the
-        // full 16 bytes is critical: an 8-byte 32-bit header used to leave the
-        // free box's 8 zero padding bytes dangling at the START of the mdat
-        // payload, which strict container walkers could choke on.
+        // Replace the 16-byte free box with a 64-bit mdat header.
         int ftypSize = readIntBE(initSegmentData, 0);
         long freePos = initSegmentFilePosition + ftypSize;
-        long mdatEnd = moovPos;
-        long mdatSize = mdatEnd - freePos;
-        java.nio.ByteBuffer hdr = java.nio.ByteBuffer.allocate(16);
-        hdr.putInt(1);                       // size = 1 (extended)
-        hdr.putInt(0x6D646174);              // type = 'mdat'
-        hdr.putLong(mdatSize);               // largesize = full box size
-        hdr.flip();
-        ch.position(freePos);
-        ch.write(hdr);
+        long mdatSize = moovPos - freePos;
+        ByteBuffer hdr = ByteBuffer.allocate(16);
+        hdr.putInt(1).putInt(0x6D646174).putLong(mdatSize).flip();
+        try {
+            ch.position(moovPos);
+            writeFully(ch, moov);
+            patchMvhdDuration(ch);
+            ch.position(freePos);
+            writeFully(ch, hdr);
+        } catch (IOException failure) {
+            try {
+                // Restore original init bytes if the duration/header was partly patched.
+                ch.position(initSegmentFilePosition);
+                writeFully(ch, ByteBuffer.wrap(initSegmentData));
+                ch.truncate(committedOutputEnd);
+            } catch (IOException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        }
         FLog.i(TAG, "Hybrid MP4 finalized: " + fragmentPositions.size()
                 + " fragments, moov=" + moovSize + "B, mdat(64bit)=" + mdatSize + "B");
+    }
+
+    static void writeFully(java.nio.channels.WritableByteChannel channel, ByteBuffer buffer)
+            throws IOException {
+        int stalled = 0;
+        while (buffer.hasRemaining()) {
+            int written = channel.write(buffer);
+            if (written < 0 || (written == 0 && ++stalled == 16)) {
+                throw new IOException("녹화 파일 쓰기가 진행되지 않습니다.");
+            }
+            if (written > 0) stalled = 0;
+        }
     }
 
     /**
@@ -921,40 +975,17 @@ public class FragmentedMp4MuxerWrapper {
     private FileReopener fileReopener;
     public void setFileReopener(FileReopener reopener) { this.fileReopener = reopener; }
 
-    /** Fresh stream for continuing sequential fragment writes (positioned at EOF). */
-    private java.io.FileOutputStream reopenStreamForWrite() {
-        java.io.FileOutputStream fresh = null;
-        if (fileReopener != null) {
-            try {
-                fresh = fileReopener.reopen();
-                if (fresh != null) FLog.i(TAG, "Reopened output stream via FileReopener");
-            } catch (Exception e) {
-                FLog.w(TAG, "FileReopener (stream) failed", e);
-            }
+    private java.io.FileOutputStream reopenStreamForWrite() throws IOException {
+        // An O_APPEND descriptor cannot patch or retry at a committed offset.
+        // Path outputs recover through the original channel; SAF can supply an rw FD.
+        if (fileReopener == null) return null;
+        java.io.FileOutputStream stream = fileReopener.reopen();
+        if (stream == null) return null;
+        if (!ownsOutput(stream)) {
+            closeQuietlyStream(stream);
+            throw new IOException("다시 열린 출력이 원래 파일과 다릅니다.");
         }
-        if (fresh == null && outputPath != null) {
-            try {
-                java.io.File f = new java.io.File(outputPath);
-                if (f.exists()) {
-                    fresh = new java.io.FileOutputStream(f, true); // append-safe, no truncation
-                    FLog.i(TAG, "Reopened output stream by path: " + outputPath);
-                } else {
-                    FLog.w(TAG, "Reopen stream by path failed: file does not exist: " + outputPath);
-                }
-            } catch (Exception e) {
-                FLog.w(TAG, "Reopen stream by path failed", e);
-            }
-        }
-        if (fresh != null) {
-            // Position at EOF so sequential writes append (critical for SAF fds,
-            // which start at offset 0 after re-open).
-            try {
-                fresh.getChannel().position(fresh.getChannel().size());
-            } catch (Exception e) {
-                FLog.w(TAG, "Failed to position re-opened stream at EOF", e);
-            }
-        }
-        return fresh;
+        return stream;
     }
 
     /** Fresh READABLE channel for the post-finalize audit. */
@@ -964,7 +995,8 @@ public class FragmentedMp4MuxerWrapper {
             try {
                 java.io.FileInputStream in = fileReopener.reopenRead();
                 if (in != null) {
-                    return in.getChannel();
+                    if (ownsOutput(in.getFD())) return in.getChannel();
+                    in.close();
                 }
             } catch (Exception e) {
                 FLog.w(TAG, "FileReopener (read) failed", e);
@@ -975,7 +1007,9 @@ public class FragmentedMp4MuxerWrapper {
             try {
                 java.io.File f = new java.io.File(outputPath);
                 if (f.exists()) {
-                    return new java.io.RandomAccessFile(f, "r").getChannel();
+                    java.io.RandomAccessFile file = new java.io.RandomAccessFile(f, "r");
+                    if (ownsOutput(file.getFD())) return file.getChannel();
+                    file.close();
                 }
             } catch (Exception e) {
                 FLog.w(TAG, "Read re-open by path failed", e);
@@ -984,34 +1018,22 @@ public class FragmentedMp4MuxerWrapper {
         return null;
     }
 
-    /** Fresh positionable channel for finalization. */
-    private java.nio.channels.FileChannel reopenChannel() {        // 1) Explicit re-opener (SAF/fd mode: re-resolves the content URI).
-        if (fileReopener != null) {
-            try {
-                java.io.FileOutputStream s = fileReopener.reopen();
-                if (s != null) {
-                    FLog.i(TAG, "Reopened output channel via FileReopener");
-                    return s.getChannel();
+    private java.nio.channels.FileChannel reopenChannel() {
+        try {
+            java.io.FileOutputStream stream = reopenStreamForWrite();
+            if (stream != null) return stream.getChannel();
+            if (outputPath != null && new java.io.File(outputPath).isFile()) {
+                java.io.RandomAccessFile file = new java.io.RandomAccessFile(outputPath, "rw");
+                boolean accepted = false;
+                try {
+                    accepted = ownsOutput(file.getFD());
+                    if (accepted) return file.getChannel();
+                } finally {
+                    if (!accepted) file.close();
                 }
-            } catch (Exception e) {
-                FLog.w(TAG, "FileReopener failed", e);
             }
-        }
-        // 2) Path-based re-open (internal storage mode). "rw" preserves existing
-        //    data (no truncation) and lets us control the write position.
-        if (outputPath != null) {
-            try {
-                java.io.File f = new java.io.File(outputPath);
-                if (f.exists()) {
-                    java.nio.channels.FileChannel ch =
-                            new java.io.RandomAccessFile(f, "rw").getChannel();
-                    FLog.i(TAG, "Reopened output channel by path: " + outputPath);
-                    return ch;
-                }
-                FLog.w(TAG, "Reopen by path failed: file does not exist: " + outputPath);
-            } catch (Exception e) {
-                FLog.w(TAG, "Reopen by path failed", e);
-            }
+        } catch (Exception failure) {
+            FLog.w(TAG, "출력 파일을 안전하게 다시 열지 못했습니다.", failure);
         }
         return null;
     }
@@ -1085,29 +1107,6 @@ public class FragmentedMp4MuxerWrapper {
             return;
         }
             try {
-            // Defensive check: catch an invalid FileDescriptor early with a clear log message
-            // rather than letting it surface as a cryptic EBADF inside fileOutputStream.write().
-            // An invalid fd here means the ParcelFileDescriptor was closed prematurely —
-            // most likely the deferred-close path ran too early on this device.
-            if (fileOutputStream != null) {
-                try {
-                    java.io.FileDescriptor fd = fileOutputStream.getFD();
-                    if (fd == null || !fd.valid()) {
-                        // Rate-limited: this used to flood logcat with thousands of identical lines.
-                        if (invalidFdLogCount < 5) {
-                            FLog.e(TAG, "handleProcessedSegment: FileDescriptor is INVALID — skipping write. " +
-                                    "This indicates the ParcelFileDescriptor was closed before the muxer finished. " +
-                                    "segment.isInit=" + segment.isInitSegment
-                                    + " (suppressing further identical logs)");
-                        }
-                        invalidFdLogCount++;
-                        return;
-                    }
-                } catch (IOException e) {
-                    FLog.e(TAG, "handleProcessedSegment: Could not retrieve FileDescriptor — skipping write", e);
-                    return;
-                }
-            }
             // Extract bytes from Media3's payload buffer without mutating it.
             // Some Media3 versions leave the buffer in write-mode (position at end, limit=capacity),
             // while others provide it already ready for reading (position=0, limit=dataSize).
@@ -1171,6 +1170,7 @@ public class FragmentedMp4MuxerWrapper {
                 cumulativeDurationUs += segment.durationMs * 1000L;
             }
             } catch (Exception e) {
+                if (outputFailure == null) outputFailure = new IOException("조각 기록에 실패했습니다.", e);
                 FLog.e(TAG, "❌ Error handling processed segment", e);
             }
         } // end synchronized(ioLock)
@@ -1188,57 +1188,65 @@ public class FragmentedMp4MuxerWrapper {
      * instead of silently dropping fragments, which is what previously left
      * files "fragmented-only" or lost the tail of recordings.
      */
-    private void writeSegmentWithRecovery(byte[] data, boolean isInit) {
+    private void writeSegmentWithRecovery(byte[] data, boolean isInit) throws IOException {
+        if (outputFailure != null) throw outputFailure;
         try {
             writeSegmentBytes(data, isInit);
-        } catch (IOException e) {
+        } catch (IOException first) {
             segmentWriteFailures++;
-            FLog.e(TAG, "Segment write failed (" + e.getMessage()
-                    + ") — hot-swapping to a fresh stream", e);
-            java.io.FileOutputStream fresh = reopenStreamForWrite();
-            if (fresh == null) {
-                FLog.e(TAG, "Segment write recovery FAILED — no fresh stream available; segment lost (failures="
-                        + segmentWriteFailures + ")");
-                return;
-            }
-            java.io.FileOutputStream old = fileOutputStream;
-            fileOutputStream = fresh;
-            closeQuietlyStream(old);
-            streamReopenCount++;
-            FLog.w(TAG, "HOT-SWAP: output stream re-opened mid-recording (failures="
-                    + segmentWriteFailures + ", reopens=" + streamReopenCount + ")");
             try {
+                try {
+                    resetToCommittedBoundary(fileOutputStream.getChannel(), committedOutputEnd);
+                } catch (IOException stale) {
+                    java.io.FileOutputStream fresh = reopenStreamForWrite();
+                    if (fresh == null) throw stale;
+                    try {
+                        resetToCommittedBoundary(fresh.getChannel(), committedOutputEnd);
+                    } catch (IOException unsafe) {
+                        closeQuietlyStream(fresh);
+                        throw unsafe;
+                    }
+                    java.io.FileOutputStream old = fileOutputStream;
+                    fileOutputStream = fresh;
+                    closeQuietlyStream(old);
+                    streamReopenCount++;
+                }
                 writeSegmentBytes(data, isInit);
-            } catch (IOException e2) {
-                FLog.e(TAG, "Segment write failed AGAIN after re-open — segment lost", e2);
+            } catch (IOException retry) {
+                try {
+                    resetToCommittedBoundary(fileOutputStream.getChannel(), committedOutputEnd);
+                } catch (IOException rollback) {
+                    if (rollback != retry) retry.addSuppressed(rollback);
+                }
+                if (first != retry) retry.addSuppressed(first);
+                outputFailure = retry;
+                throw retry;
             }
         }
     }
 
+    static void resetToCommittedBoundary(java.nio.channels.FileChannel channel, long boundary)
+            throws IOException {
+        if (channel.size() < boundary) throw new IOException("확정된 녹화 데이터가 부족합니다.");
+        channel.truncate(boundary);
+        channel.position(boundary);
+    }
 
-    private void writeSegmentBytes(byte[] data, boolean isInit) throws IOException {        if (isInit) {
+    private void writeSegmentBytes(byte[] data, boolean isInit) throws IOException {
+        long pos = committedOutputEnd;
+        if (fileOutputStream.getChannel().position() != pos) {
+            throw new IOException("녹화 출력 위치가 일치하지 않습니다.");
+        }
+        fileOutputStream.write(data);
+        fileOutputStream.flush();
+        committedOutputEnd += data.length;
+        if (isInit) {
             initSegmentData = data;
-            long pos = fileOutputStream.getChannel().position();
             initSegmentFilePosition = pos;
-            fileOutputStream.write(data);
-            fileOutputStream.flush();
         } else {
-            long pos = fileOutputStream.getChannel().position();
             fragmentPositions.add(pos);
             parseFragmentForFinalization(data);
             logFirstVideoSampleInFragment(data);
-            try {
-                fileOutputStream.write(data);
-                fileOutputStream.flush();
-            } catch (IOException e) {
-                // Roll back tracking for this fragment — it never landed on disk.
-                if (!fragmentPositions.isEmpty()) fragmentPositions.remove(fragmentPositions.size() - 1);
-                if (!fragmentAudioCounts.isEmpty()) fragmentAudioCounts.remove(fragmentAudioCounts.size() - 1);
-                if (!fragmentVideoCounts.isEmpty()) fragmentVideoCounts.remove(fragmentVideoCounts.size() - 1);
-                if (!fragmentAudioOffsets.isEmpty()) fragmentAudioOffsets.remove(fragmentAudioOffsets.size() - 1);
-                if (!fragmentVideoOffsets.isEmpty()) fragmentVideoOffsets.remove(fragmentVideoOffsets.size() - 1);
-                throw e;
-            }
         }
     }
 

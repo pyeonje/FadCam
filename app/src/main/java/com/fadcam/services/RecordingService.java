@@ -1700,6 +1700,10 @@ public class RecordingService extends Service {
             }
             return START_STICKY;
         } else if (Constants.INTENT_ACTION_START_RECORDING.equals(action)) {
+            if (isStopping || isCameraResourceReleasing || previewOnlyStopping || serviceStopRequested) {
+                broadcastOnRecordingStateCallback();
+                return START_STICKY;
+            }
             pendingPreviewOnlyStart = false;
             if (previewOnlyActive) {
                 FLog.d(TAG, "Transitioning from preview-only to recording mode");
@@ -1827,9 +1831,6 @@ public class RecordingService extends Service {
                 recordingHaptics.beginSession();
                 captureSessionDisplayOrientation(intent);
                 recordingState = RecordingState.STARTING;
-                // Clear a stale stopping flag from a previous recording that
-                // may still be cleaning up asynchronously on a background thread.
-                isStopping = false;
                 clearRecordingTimelineState();
                 sharedPreferencesManager.setRecordingInProgress(true);
                 CameraType selectedType = sharedPreferencesManager.getCameraSelection();
@@ -2164,9 +2165,13 @@ public class RecordingService extends Service {
     }
 
     private void capturePhotoFromRecording() {
+        if (recordingState == RecordingState.PAUSED) {
+            mainHandler.post(() -> Toast.makeText(getApplicationContext(),
+                    R.string.photo_capture_paused, Toast.LENGTH_SHORT).show());
+            return;
+        }
         boolean canCaptureFromSession =
                 recordingState == RecordingState.IN_PROGRESS
-                        || recordingState == RecordingState.PAUSED
                         || (previewOnlyActive && recordingState == RecordingState.NONE);
         if (glRecordingPipeline == null || !canCaptureFromSession) {
             mainHandler.post(() -> Toast.makeText(getApplicationContext(),
@@ -2432,18 +2437,19 @@ public class RecordingService extends Service {
         if (durationLimitController != null && durationLimitController.stopSession()) {
             FLog.d(TAG, "Cancelled maximum recording duration for current session");
         }
-        // The session file is about to be finalized asynchronously on the stop
-        // thread — guard it from the self-healing scan until finalization is
-        // done (see IN_FLIGHT_FINALIZATIONS).
+        final com.fadcam.opengl.GLRecordingPipeline requestedPipeline;
+        synchronized (this) {
+            if (isStopping) {
+                FLog.w(TAG, "stopRecording: Already in stopping process, ignoring duplicate call");
+                return;
+            }
+            finalizingTimelineMs = getEffectiveTimelineMs();
+            isStopping = true;
+            requestedPipeline = glRecordingPipeline;
+            if (requestedPipeline != null) requestedPipeline.requestOutputStop();
+        }
         final String inFlightUri = getCurrentRecordingMediaUri();
         addInFlightFinalization(inFlightUri);
-        if (isStopping) {
-            FLog.w(TAG, "stopRecording: Already in stopping process, ignoring duplicate call");
-            return;
-        }
-
-        finalizingTimelineMs = getEffectiveTimelineMs();
-        isStopping = true;
         recordingHaptics.onRecordingStopped(this);
         FLog.i(TAG, ">> stopRecording sequence initiated. Current state: " + recordingState);
 
@@ -2479,6 +2485,7 @@ public class RecordingService extends Service {
                 }
                 currentSegmentParcelFileDescriptor = null;
             }
+            removeInFlightFinalization(inFlightUri);
             isStopping = false; // Reset stopping flag if we're already stopped
             return;
         }
@@ -2518,9 +2525,12 @@ public class RecordingService extends Service {
         com.fadcam.Utils.stopForegroundCompat(this, true);
         cancelNotification();
 
+        // The ending pipeline belongs only to this session. START rejects while isStopping.
+        final com.fadcam.opengl.GLRecordingPipeline endingPipeline = requestedPipeline;
         // Use a background thread for resource cleanup to avoid blocking the main
         // thread
         new Thread(() -> {
+            boolean outputSaved = true;
             try {
                 // Set camera resources as releasing and broadcast early
                 setCameraResourcesReleasing(true);
@@ -2546,16 +2556,17 @@ public class RecordingService extends Service {
                 closeCameraBeforePipelineShutdown();
                 
                 // Stop and release the GL pipeline
-                if (glRecordingPipeline != null) {
+                if (endingPipeline != null) {
                     try {
-                        FLog.d(TAG, "Stopping GLRecordingPipeline");
-                        glRecordingPipeline.stopRecording();
+                        endingPipeline.stopRecording();
                     } catch (Exception e) {
+                        outputSaved = false;
                         FLog.e(TAG, "Error stopping GLRecordingPipeline", e);
                     } finally {
-                        glRecordingPipeline = null;
+                        if (glRecordingPipeline == endingPipeline) glRecordingPipeline = null;
                     }
                 }
+                final boolean recordingSaved = outputSaved;
 
                 // Delete temporary file if in STREAM_ONLY mode
                 if (currentSegmentFile != null && currentSegmentFile.exists()) {
@@ -2690,7 +2701,7 @@ public class RecordingService extends Service {
                     // refresh
                     try {
                         Intent recordingCompleteIntent = new Intent(Constants.ACTION_RECORDING_COMPLETE);
-                        recordingCompleteIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, true);
+                        recordingCompleteIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, recordingSaved);
                         // Note: We don't have the specific URI here, but RecordsFragment will do a full
                         // refresh
                         sendBroadcast(recordingCompleteIntent);
@@ -2700,7 +2711,11 @@ public class RecordingService extends Service {
 
                     FLog.d(TAG, "stopRecording sequence completed successfully");
                     removeInFlightFinalization(inFlightUri);
-                    finalizeJustStoppedRecording();
+                    if (recordingSaved) {
+                        finalizeJustStoppedRecording();
+                    } else {
+                        Toast.makeText(this, R.string.personal_recording_save_failed, Toast.LENGTH_LONG).show();
+                    }
                 });            } catch (Exception e) {
                 FLog.e(TAG, "Error in stopRecording cleanup thread", e);
                 removeInFlightFinalization(inFlightUri);
@@ -7032,10 +7047,39 @@ public class RecordingService extends Service {
         return new File(videoDir, baseFilename);
     }
 
+    static boolean isPriorSafDestination(Uri uri, String currentUri) {
+        return currentUri != null && uri.equals(Uri.parse(currentUri));
+    }
+
+    static ParcelFileDescriptor openNewSafSegment(android.content.ContentResolver resolver,
+            Uri uri, String currentUri) throws IOException {
+        if (isPriorSafDestination(uri, currentUri)) {
+            throw new IOException("이전 녹화 파일을 새 조각으로 다시 열 수 없습니다.");
+        }
+        // rw never truncates. Some providers may return aliases for an existing document.
+        return resolver.openFileDescriptor(uri, "rw");
+    }
+
+    private static android.system.StructStat safIdentity(ParcelFileDescriptor pfd) {
+        if (pfd == null) return null;
+        try { return android.system.Os.fstat(pfd.getFileDescriptor()); }
+        catch (Exception e) { return null; }
+    }
+
     // Inner class for OpenGL pipeline segment callback
     private class GLSegmentCallback implements com.fadcam.opengl.GLRecordingPipeline.SegmentCallback {
         @Override
+        public void onOutputFailure() {
+            final com.fadcam.opengl.GLRecordingPipeline failed = glRecordingPipeline;
+            mainHandler.post(() -> {
+                if (failed != null && failed == glRecordingPipeline && !isStopping) stopRecording();
+            });
+        }
+
+        @Override
         public void onSegmentRollover(int nextSegmentNumber) {
+            final com.fadcam.opengl.GLRecordingPipeline pipeline = glRecordingPipeline;
+            if (isStopping || pipeline == null) return;
             FLog.d(TAG, "GLSegmentCallback.onSegmentRollover called for segment " + nextSegmentNumber);
             String storageMode = sharedPreferencesManager.getStorageMode();
             VideoCodec selectedCodec = sharedPreferencesManager.getVideoCodec();
@@ -7045,7 +7089,6 @@ public class RecordingService extends Service {
                 String customUriString = sharedPreferencesManager.getCustomStorageUri();
                 if (customUriString == null) {
                     FLog.e(TAG, "Segment rollover: Custom storage selected but URI is null");
-                    stopRecording();
                     return;
                 }
                 boolean isStreamingActive = com.fadcam.streaming.RemoteStreamManager.getInstance().isStreamingEnabled();
@@ -7057,7 +7100,6 @@ public class RecordingService extends Service {
                         customUriString, isStreamAndSave);
                 if (pickedDir == null || !pickedDir.canWrite()) {
                     FLog.e(TAG, "Segment rollover: Cannot write to selected custom directory");
-                    stopRecording();
                     return;
                 }
                 String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
@@ -7068,22 +7110,13 @@ public class RecordingService extends Service {
                 androidx.documentfile.provider.DocumentFile videoFile = pickedDir.createFile("video/mp4", baseFilename);
                 if (videoFile == null) {
                     FLog.e(TAG, "Segment rollover: Failed to create SAF file");
-                    stopRecording();
                     return;
                 }
                 Uri safUri = videoFile.getUri();
-                currentSegmentUriString = safUri.toString();
-                currentSegmentPath = safUri.toString();
-                currentSegmentFile = null;
-                com.fadcam.ActiveRecordingStats.rolloverToNewSegment(null, safUri.toString(), RecordingService.this);
-                // Track SAF URI for STREAM_ONLY cleanup during segment rollover
-                boolean isStreamOnlyRollover = isStreamingActive
-                        && (streamingMode == com.fadcam.streaming.RemoteStreamManager.StreamingMode.STREAM_ONLY);
-                if (isStreamOnlyRollover) {
-                    streamOnlySafUris.add(safUri.toString());
-                    FLog.i(TAG, "📺 STREAM_ONLY (SAF rollover): Tracking temp URI: " + safUri);
+                String previousUri = currentSegmentUriString;
+                if (isPriorSafDestination(safUri, previousUri)) {
+                    throw new IllegalStateException("제공자가 이전 녹화 파일을 새 조각으로 반환했습니다.");
                 }
-                
                 // SAMSUNG SAF FIX: The GL pipeline now fully stops and releases the old muxer
                 // BEFORE invoking this callback (see GLRecordingPipeline.rolloverSegment()).
                 // That means muxer.close() has already returned synchronously — all
@@ -7104,6 +7137,7 @@ public class RecordingService extends Service {
                     oldPfd = safRecordingPfd;
                     safRecordingPfd = null;
                 }
+                android.system.StructStat previousIdentity = safIdentity(oldPfd);
                 if (oldPfd != null) {
                     try {
                         oldPfd.close();
@@ -7116,35 +7150,48 @@ public class RecordingService extends Service {
                 // path (old muxer is done before we get here), but null it out for safety.
                 previousSegmentParcelFileDescriptor = null;
                 
-                // Open the new PFD now that the old one is fully closed (no concurrent-open conflict)
+                ParcelFileDescriptor pfd = null;
+                boolean confirmedNew = false;
+                boolean accepted = false;
                 try {
-                    ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(safUri, "w");
-                    if (pfd == null) {
-                        FLog.e(TAG, "Segment rollover: Failed to open ParcelFileDescriptor for SAF URI");
-                        stopRecording();
-                        return;
+                    pfd = openNewSafSegment(getContentResolver(), safUri, previousUri);
+                    if (pfd == null) throw new IOException("새 녹화 파일을 열 수 없습니다.");
+                    android.system.StructStat replacement = safIdentity(pfd);
+                    if (pfd.getStatSize() != 0L || (oldPfd != null &&
+                            (previousIdentity == null || replacement == null
+                            || previousIdentity.st_ino == 0 || replacement.st_ino == 0
+                            || (previousIdentity.st_ino == replacement.st_ino
+                                && previousIdentity.st_dev == replacement.st_dev)))) {
+                        throw new IOException("새 녹화 파일이 비어 있거나 다른 파일인지 확인할 수 없습니다.");
                     }
-                    
-                    // Store the NEW PFD as current
+                    confirmedNew = true;
+                    if (isStopping || pipeline != glRecordingPipeline
+                            || !pipeline.setNextOutput(new com.fadcam.opengl.GLRecordingPipeline.OutputTarget(
+                                    null, pfd.getFileDescriptor(), safUri.toString(), nextSegmentNumber))) return;
                     currentSegmentParcelFileDescriptor = pfd;
-                    FLog.d(TAG, "Successfully created new segment file with SAF: " + videoFile.getName());
-                    
-                    if (glRecordingPipeline != null) {
-                        // Pass the raw FileDescriptor to the pipeline
-                        // The ParcelFileDescriptor wrapper stays alive in currentSegmentParcelFileDescriptor
-                        glRecordingPipeline.setNextOutput(null, pfd.getFileDescriptor());
-                        FLog.d(TAG, "Set next output to file descriptor for segment " + nextSegmentNumber);
-                    } else {
-                        FLog.e(TAG, "glRecordingPipeline is null, cannot set next output");
-                        // Clean up the PFD if we can't use it
-                        pfd.close();
-                        currentSegmentParcelFileDescriptor = null;
+                    accepted = true;
+                    currentSegmentUriString = safUri.toString();
+                    currentSegmentPath = currentSegmentUriString;
+                    currentSegmentFile = null;
+                    com.fadcam.ActiveRecordingStats.rolloverToNewSegment(null, currentSegmentUriString,
+                            RecordingService.this);
+                    if (isStreamingActive
+                            && streamingMode == com.fadcam.streaming.RemoteStreamManager.StreamingMode.STREAM_ONLY) {
+                        streamOnlySafUris.add(currentSegmentUriString);
                     }
-                } catch (Exception e) {
-                    FLog.e(TAG, "Segment rollover: Exception opening PFD for SAF URI", e);
-                    currentSegmentParcelFileDescriptor = null;
-                    stopRecording();
+                } catch (IOException e) {
+                    throw new IllegalStateException("다음 녹화 파일을 열지 못했습니다.", e);
+                } finally {
+                    if (!accepted) {
+                        if (pfd != null) {
+                            try { pfd.close(); }
+                            catch (IOException e) { FLog.w(TAG, "새 녹화 파일을 닫지 못했습니다.", e); }
+                        }
+                        // Do not delete a null/unknown/aliased target.
+                        if (confirmedNew) videoFile.delete();
+                    }
                 }
+
             } else {
                 FLog.d(TAG, "Using internal storage for segment rollover");
                 
@@ -7162,24 +7209,18 @@ public class RecordingService extends Service {
                 File nextFile = createNextSegmentOutputFile(nextSegmentNumber);
                 if (nextFile == null) {
                     FLog.e(TAG, "Segment rollover: Failed to create next segment file");
-                    stopRecording();
                     return;
                 }
                 FLog.d(TAG, "Successfully created new segment file: " + nextFile.getAbsolutePath());
                 
-                // Track this as current segment
+                if (isStopping || pipeline != glRecordingPipeline
+                        || !pipeline.setNextOutput(new com.fadcam.opengl.GLRecordingPipeline.OutputTarget(
+                                nextFile.getAbsolutePath(), null, null, nextSegmentNumber))) return;
                 currentSegmentFile = nextFile;
                 currentSegmentPath = nextFile.getAbsolutePath();
                 currentSegmentUriString = Uri.fromFile(nextFile).toString();
-                com.fadcam.ActiveRecordingStats.rolloverToNewSegment(nextFile.getAbsolutePath(), null, RecordingService.this);
-                
-                if (glRecordingPipeline != null) {
-                    glRecordingPipeline.setNextOutput(nextFile.getAbsolutePath(), null);
-                    FLog.d(TAG, "Set next output to path: " + nextFile.getAbsolutePath() + " for segment "
-                            + nextSegmentNumber);
-                } else {
-                    FLog.e(TAG, "glRecordingPipeline is null, cannot set next output");
-                }
+                com.fadcam.ActiveRecordingStats.rolloverToNewSegment(currentSegmentPath, null,
+                        RecordingService.this);
             }
         }
     }
@@ -7218,10 +7259,7 @@ public class RecordingService extends Service {
         }
 
         try {
-            if (ActivityCompat.checkSelfPermission(this,
-                    Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
-                    (sharedPreferencesManager.isRecordAudioEnabled() && ActivityCompat.checkSelfPermission(this,
-                            Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)) {
+            if (!com.fadcam.utils.RecordingPermissions.canRecord(this, sharedPreferencesManager.isRecordAudioEnabled())) {
                 FLog.e(TAG, "Permissions missing, cannot start recording.");
                 Toast.makeText(this, getString(R.string.toast_permissions_required), Toast.LENGTH_LONG).show();
                 recordingState = RecordingState.NONE;
@@ -7366,7 +7404,8 @@ public class RecordingService extends Service {
                 // Stale-fd resilience (#332): register the SAF URI so hybrid finalization
                 // can re-open the file with a fresh fd after process-death churn.
                 try {
-                    glRecordingPipeline.setOutputUri(safUri.toString());
+                    glRecordingPipeline.setNextOutput(new com.fadcam.opengl.GLRecordingPipeline.OutputTarget(
+                            null, safRecordingPfd.getFileDescriptor(), safUri.toString(), initialSegmentNumber));
                 } catch (Exception ignored) {}
                 FLog.i(TAG, "[STORAGE] SAF mode: uri=" + safUri);
             } else {

@@ -50,18 +50,19 @@ public class GLRecordingPipeline {
     private FragmentedMp4MuxerWrapper mediaMuxer;
     private Surface encoderInputSurface;
     private Surface cameraInputSurface;
-    private boolean isRecording = false;
+    private volatile boolean isRecording = false;
     private volatile boolean previewOnlyRendering = false;
-    private boolean isStopped = false;
+    private volatile boolean isStopped = false;
+    private boolean recordingStarted;
+    private volatile RuntimeException recordingFailure;
     private HandlerThread renderThread;
     private Handler handler;
     /** Dedicated thread for draining encoder output and writing to muxer.
      *  Decoupled from the GL render thread so slow muxer I/O never blocks frame delivery. */
     private HandlerThread drainThread;
     private Handler drainHandler;
-    /** Dedicated thread for segment rollover I/O (SAF file ops) — keeps the drain loop unblocked. */
-    private HandlerThread rolloverIoThread;
-    private Handler rolloverIoHandler;
+    private final DrainRunnable drainTask = new DrainRunnable();
+    private final AtomicBoolean blackFrameQueued = new AtomicBoolean();
     private final Object drainLock = new Object();
     private final AtomicBoolean renderRunnableQueued = new AtomicBoolean(false);
     private final int videoWidth;
@@ -70,10 +71,6 @@ public class GLRecordingPipeline {
     private final int videoFramerate;
     private final String outputFilePath;
     private final FileDescriptor outputFd;
-    /** SAF content URI for fd-based outputs — used to re-open a fresh channel on stale-fd finalization. */
-    private String outputUri;
-    /** Keeps the SAF re-open ParcelFileDescriptor referenced so GC cannot close it mid-finalization. */
-    private android.os.ParcelFileDescriptor reopenPfd;
     private Surface previewSurface;
     // Pending preview apply support to debounce rapid preview surface changes
     private Surface pendingPreviewToApply = null;
@@ -99,6 +96,26 @@ public class GLRecordingPipeline {
          * @param nextSegmentNumber The next segment number (1-based)
          */
         void onSegmentRollover(int nextSegmentNumber);
+        default void onOutputFailure() {}
+    }
+
+    /** Immutable target for one segment. The service retains its initial SAF PFD;
+     * opened recovery streams own the descriptors they receive. */
+    public static final class OutputTarget {
+        final String path;
+        final FileDescriptor fd;
+        final String uri;
+        final int segment;
+
+        public OutputTarget(String path, FileDescriptor fd, String uri, int segment) {
+            if ((path == null) == (fd == null) || (path != null && uri != null)) {
+                throw new IllegalArgumentException("녹화 출력 경로가 올바르지 않습니다.");
+            }
+            this.path = path;
+            this.fd = fd;
+            this.uri = uri;
+            this.segment = segment;
+        }
     }
 
     /**
@@ -154,8 +171,8 @@ public class GLRecordingPipeline {
     private long maxFileSizeBytes = Long.MAX_VALUE;
     private int segmentNumber = 1;
     private SegmentCallback segmentCallback;
-    private String currentOutputFilePath;
-    private FileDescriptor currentOutputFd;
+    private volatile OutputTarget outputTarget;
+    private volatile boolean outputStopRequested;
     private boolean muxerStarted = false;
     // --- Dashcam splitting additions ---
     private long segmentBytesWritten = 0L; // Bytes written in current segment (video+audio)
@@ -208,7 +225,7 @@ public class GLRecordingPipeline {
     private int audioBitrate;
     private int audioChannelCount;
 
-    private boolean released = false;
+    private volatile boolean released = false;
 
     private final VideoCodec videoCodec;
 
@@ -269,50 +286,59 @@ public class GLRecordingPipeline {
         void onCaptured(@Nullable android.graphics.Bitmap bitmap);
     }
 
+    private final java.util.Set<PhotoRequest> pendingPhotos = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    private final class PhotoRequest {
+        final PhotoCaptureCallback callback;
+        final AtomicBoolean completed = new AtomicBoolean();
+        PhotoRequest(PhotoCaptureCallback callback) { this.callback = callback; }
+        void finish(@Nullable android.graphics.Bitmap bitmap) {
+            if (!completed.compareAndSet(false, true)) {
+                if (bitmap != null) bitmap.recycle();
+                return;
+            }
+            pendingPhotos.remove(this);
+            callback.onCaptured(bitmap);
+        }
+    }
+
     public void capturePhotoFrame(@Nullable PhotoCaptureCallback callback) {
-        if (handler == null || glRenderer == null || (!isRecording && !previewOnlyRendering)) {
-            if (callback != null) callback.onCaptured(null);
+        if (callback == null) return;
+        final Handler renderHandler = handler;
+        final GLWatermarkRenderer renderer = glRenderer;
+        if (renderHandler == null || renderer == null || isStopped || isPaused
+                || (!isRecording && !previewOnlyRendering)) {
+            callback.onCaptured(null);
             return;
         }
-        rendererActions.offer(() -> {
+        PhotoRequest request = new PhotoRequest(callback);
+        pendingPhotos.add(request);
+        if (isStopped || !renderHandler.post(() -> {
+            if (request.completed.get()) return;
             android.graphics.Bitmap bitmap = null;
             try {
-                // Capture raw camera frame from GL path (without GL watermark),
-                // then let PhotoStorageHelper apply the exact normal FadShot watermark style.
-                glRenderer.setSuppressWatermarkForSnapshot(true);
-                // Render and discard enough frames to flush any previously-watermarked
-                // frames from the encoder pipeline. 6 frames ensures the encoder's
-                // input-to-output latency is fully drained.
-                for (int i = 0; i < 6; i++) {
-                    glRenderer.renderToEncoderAllowStaleFrame();
-                    bitmap = glRenderer.captureEncoderFrameBitmap();
-                    if (!isClearlyBlankFrame(bitmap) && i >= 2) {
-                        break;
-                    }
-                    if (bitmap != null) {
-                        bitmap.recycle();
-                        bitmap = null;
-                    }
+                if (!isStopped && !isPaused && renderer == glRenderer) {
+                    bitmap = renderer.capturePhotoFrameOffscreen();
                 }
-                if (isClearlyBlankFrame(bitmap)) {
-                    if (bitmap != null) {
-                        bitmap.recycle();
-                    }
+                if (isStopped || isPaused || isClearlyBlankFrame(bitmap)) {
+                    if (bitmap != null) bitmap.recycle();
                     bitmap = null;
                 }
-            } catch (Exception e) {
-                FLog.w(TAG, "capturePhotoFrame failed", e);
+            } catch (RuntimeException error) {
+                if (bitmap != null) bitmap.recycle();
+                bitmap = null;
+                FLog.w(TAG, "사진을 캡처하지 못했습니다.", error);
             } finally {
-                try {
-                    glRenderer.setSuppressWatermarkForSnapshot(false);
-                } catch (Exception ignored) {
-                }
+                request.finish(bitmap);
             }
-            if (callback != null) {
-                callback.onCaptured(bitmap);
-            }
-        });
-        handler.post(renderRunnable);
+        })) request.finish(null);
+    }
+
+    private void cancelPhotoRequests() {
+        for (PhotoRequest request : pendingPhotos) {
+            try { request.finish(null); }
+            catch (RuntimeException failure) { FLog.w(TAG, "사진 취소 알림에 실패했습니다.", failure); }
+        }
     }
 
     private boolean isClearlyBlankFrame(@Nullable android.graphics.Bitmap bitmap) {
@@ -412,8 +438,7 @@ public class GLRecordingPipeline {
         this.maxFileSizeBytes = maxFileSizeBytes;
         this.segmentNumber = segmentNumber;
         this.segmentCallback = segmentCallback;
-        this.currentOutputFilePath = outputFilePath;
-        this.currentOutputFd = null;
+        this.outputTarget = new OutputTarget(outputFilePath, null, null, segmentNumber);
         this.orientation = orientation;
         this.deviceOrientation = com.fadcam.utils.CameraDisplayOrientation.resolve(context, orientation);
         this.sensorOrientation = sensorOrientation;
@@ -447,8 +472,7 @@ public class GLRecordingPipeline {
         this.maxFileSizeBytes = maxFileSizeBytes;
         this.segmentNumber = segmentNumber;
         this.segmentCallback = segmentCallback;
-        this.currentOutputFilePath = null;
-        this.currentOutputFd = outputFd;
+        this.outputTarget = new OutputTarget(null, outputFd, null, segmentNumber);
         this.orientation = orientation;
         this.deviceOrientation = com.fadcam.utils.CameraDisplayOrientation.resolve(context, orientation);
         this.sensorOrientation = sensorOrientation;
@@ -740,7 +764,8 @@ public class GLRecordingPipeline {
     /**
      * Starts the recording pipeline.
      */
-    public void startRecording() {
+    public synchronized void startRecording() {
+        if (isStopped) throw new IllegalStateException("녹화 종료가 진행 중입니다.");
         try {
             if (!isRecording) {
                 try {
@@ -772,6 +797,9 @@ public class GLRecordingPipeline {
                 if (encoderInputSurface == null) {
                     throw new RuntimeException("Failed to create encoder input surface");
                 }
+
+                recordingStarted = true;
+                if (mediaMuxer == null) setupMuxer();
 
                 // Initialize audio settings
                 initAudioSettings();
@@ -807,34 +835,6 @@ public class GLRecordingPipeline {
                         }
                     }
                     
-                    // If audio track still not added after 2 seconds, log warning
-                    // The muxer will start when video format is ready and we'll continue
-                    // to try adding audio in the drainAudioEncoder loop
-                    if (audioTrackIndex == -1) {
-                        FLog.w(TAG, "Audio track not yet ready after initialization - will continue trying in render loop");
-                        
-                        // Add a delayed safety check: if muxer hasn't started after 5 seconds,
-                        // start it without audio to prevent recording from hanging
-                        handler.postDelayed(new Runnable() {
-                            @Override
-                            public void run() {
-                                synchronized (GLRecordingPipeline.this) {
-                                    if (!muxerStarted && videoTrackIndex != -1 && isRecording) {
-                                        FLog.w(TAG, "SAFETY FALLBACK: Starting muxer without audio after 5 second timeout");
-                                        try {
-                                            if (mediaMuxer != null) {
-                                                mediaMuxer.start();
-                                                muxerStarted = true;
-                                                flushPreMuxerVideoBuffer();
-                                            }
-                                        } catch (Exception e) {
-                                            FLog.e(TAG, "Failed to start muxer via safety fallback", e);
-                                        }
-                                    }
-                                }
-                            }
-                        }, 5000); // 5 second safety timeout
-                    }
                 }
 
                 // Start/refresh low-frequency watermark updater (once per second).
@@ -846,10 +846,13 @@ public class GLRecordingPipeline {
                 // Start the drain loop on a dedicated thread — decoupled from GL rendering
                 // so slow muxer I/O never blocks the camera frame delivery pipeline.
                 startDrainLoop();
+                if (audioRecordingEnabled && audioTrackIndex == -1) {
+                    drainHandler.postDelayed(this::startMuxerWithoutLateAudio, 5000);
+                }
             }
         } catch (Exception e) {
             FLog.e(TAG, "Failed to start recording pipeline", e);
-            stopRecording();
+            throw new IllegalStateException("녹화를 시작하지 못했습니다.", e);
         }
     }
 
@@ -1100,67 +1103,14 @@ public class GLRecordingPipeline {
      * Uses multiple fallback strategies if normal stop() fails.
      */
     private void emergencyFinalizeMuxer() {
-        // muxer log removed
-
-        boolean muxerStopped = false;
-
-        // Strategy 1: Normal stop (preferred)
         try {
-            // muxer log removed
-            FLog.d(TAG, String.format("═══ FINAL RECORDING STATS ═══\n" +
-                "  Video: %d samples, last pts=%.2fs\n" +
-                "  Audio: %d samples, last pts=%.2fs\n" +
-                "  Duration diff: %.2fs\n" +
-                "═══════════════════════════════",
-                videoSamplesWritten, lastVideoPts / 1000000.0,
-                audioSamplesWritten, lastAudioPts / 1000000.0,
-                Math.abs(lastVideoPts - lastAudioPts) / 1000000.0));
-            
             mediaMuxer.stop();
-            muxerStopped = true;
-            // muxer log removed
-        } catch (Exception e) {
-            FLog.w(TAG, "Normal muxer stop failed, trying emergency strategies", e);
-        }
-
-        // Strategy 2: Force stop with small delay (if normal failed)
-        if (!muxerStopped) {
-            try {
-                Thread.sleep(50); // Small delay to let pending operations complete
-                mediaMuxer.stop();
-                muxerStopped = true;
-            } catch (Exception e) {
-                FLog.w(TAG, "Force muxer stop failed, trying final strategy", e);
-            }
-        }
-
-        // Strategy 3: Release without stop (last resort to prevent app crash)
-        if (!muxerStopped) {
-            FLog.w(TAG, "All muxer stop strategies failed, releasing without stop (file may have issues)");
-        }
-
-        // Always release the muxer (even if stop failed)
-        try {
-            mediaMuxer.release();
-            // muxer log removed
-        } catch (Exception e) {
-            FLog.e(TAG, "Error releasing muxer", e);
+        } catch (RuntimeException failure) {
+            recordingFailure = failure;
         } finally {
+            mediaMuxer.release();
             mediaMuxer = null;
             muxerStarted = false;
-        }
-
-        // Release the SAF re-open PFD (kept referenced so GC didn't close it mid-finalization).
-        try {
-            if (reopenPfd != null) reopenPfd.close();
-        } catch (Exception ignored) {}
-        reopenPfd = null;
-
-        // BULLETPROOF: If file exists but may be corrupted, log for user awareness
-        if (!muxerStopped) {
-            FLog.w(TAG, "WARNING: Video file may have playback issues due to muxer stop failure");
-            // Note: With our progressive MP4 implementation, even failed stops often result
-            // in playable files
         }
     }
 
@@ -1444,56 +1394,36 @@ public class GLRecordingPipeline {
      * Uses FragmentedMp4MuxerWrapper for fMP4 streaming (Media3).
      * This is called for each segment.
      */
+    private static final class OutputCancelledException extends IOException {}
+
     private void setupMuxer() throws IOException {
-        // Use FragmentedMp4MuxerWrapper for fMP4 streaming
-        // Native Android MediaMuxer does NOT support fragmented MP4 output!
-        // We must use Media3's FragmentedMp4Muxer
-        if (currentOutputFd != null) {
-            mediaMuxer = new FragmentedMp4MuxerWrapper(currentOutputFd);
-        } else {
-            mediaMuxer = new FragmentedMp4MuxerWrapper(currentOutputFilePath);
+        if (outputStopRequested) throw new OutputCancelledException();
+        final OutputTarget target = outputTarget;
+        if (target == null || target.segment != segmentNumber || isStopped) {
+            throw new IOException("현재 녹화 조각의 출력을 준비하지 못했습니다.");
         }
-        // Diagnostic: let the wrapper know the output path even for fd-based
-        // construction, so finalization failures can report exists()/length().
-        try {
-            if (currentOutputFilePath != null) {
-                mediaMuxer.setOutputPath(currentOutputFilePath);
-            }
-        } catch (Exception ignored) {}
-
-        // ROOT-CAUSE FIX (issue #332): when the output is an fd (SAF/FUSE), the
-        // long-lived fd can go stale after process-death/recovery churn on
-        // aggressive OEMs (Xiaomi HyperOS) — finalization then fails with
-        // ENOENT and the recording data is lost on close. Provide a re-opener
-        // that re-resolves the content URI with a FRESH fd so hybrid
-        // finalization can complete against the on-disk data.
-        try {
-            if (currentOutputFd != null && outputUri != null) {
-                final String uri = outputUri;
-                mediaMuxer.setFileReopener(new com.fadcam.media.FragmentedMp4MuxerWrapper.FileReopener() {
-                    @Override
-                    public java.io.FileOutputStream reopen() throws IOException {
-                        if (reopenPfd != null) {
-                            try { reopenPfd.close(); } catch (Exception ignored) {}
-                        }
-                        reopenPfd = context.getContentResolver().openFileDescriptor(
-                                android.net.Uri.parse(uri), "rw");
-                        if (reopenPfd == null) return null;
-                        return new java.io.FileOutputStream(reopenPfd.getFileDescriptor());
-                    }
-
-                    @Override
-                    public java.io.FileInputStream reopenRead() throws IOException {
-                        android.os.ParcelFileDescriptor readPfd = context.getContentResolver()
-                                .openFileDescriptor(android.net.Uri.parse(uri), "r");
-                        if (readPfd == null) return null;
-                        return new java.io.FileInputStream(readPfd.getFileDescriptor());
-                    }
-                });
-                FLog.d(TAG, "[STORAGE] SAF re-opener registered for finalization: " + uri);
-            }
-        } catch (Exception e) {
-            FLog.w(TAG, "[STORAGE] Failed to register SAF re-opener", e);
+        if (target.fd != null) {
+            mediaMuxer = new FragmentedMp4MuxerWrapper(target.fd);
+        } else {
+            java.io.File file = new java.io.File(target.path);
+            if (!file.createNewFile()) throw new IOException("같은 이름의 녹화 파일이 이미 있습니다.");
+            if (outputStopRequested) throw new OutputCancelledException();
+            mediaMuxer = new FragmentedMp4MuxerWrapper(target.path);
+        }
+        if (target.uri != null) {
+            final android.net.Uri uri = android.net.Uri.parse(target.uri);
+            mediaMuxer.setFileReopener(new FragmentedMp4MuxerWrapper.FileReopener() {
+                @Override public java.io.FileOutputStream reopen() throws IOException {
+                    android.os.ParcelFileDescriptor fd = context.getContentResolver()
+                            .openFileDescriptor(uri, "rw");
+                    return fd == null ? null : new android.os.ParcelFileDescriptor.AutoCloseOutputStream(fd);
+                }
+                @Override public java.io.FileInputStream reopenRead() throws IOException {
+                    android.os.ParcelFileDescriptor fd = context.getContentResolver()
+                            .openFileDescriptor(uri, "r");
+                    return fd == null ? null : new android.os.ParcelFileDescriptor.AutoCloseInputStream(fd);
+                }
+            });
         }
 
         // Set location metadata if available
@@ -1533,8 +1463,7 @@ public class GLRecordingPipeline {
             initializeEncoder();
         }
 
-        // Set up the muxer
-        setupMuxer();
+        // Preview surfaces never create a file or a muxer writer.
 
         // Log encoder and muxer status (removed for performance)
         // setup log removed
@@ -1555,28 +1484,32 @@ public class GLRecordingPipeline {
      * from the GL render thread so camera frame delivery never stalls.
      */
     private void startDrainLoop() {
-        if (drainThread != null) {
-            drainHandler.removeCallbacksAndMessages(null);
-            drainThread.quitSafely();
-            drainThread = null;
-            drainHandler = null;
-        }
+        if (drainThread != null) throw new IllegalStateException("이전 인코더 종료가 진행 중입니다.");
         drainThread = new HandlerThread("GLDrainThread");
         drainThread.start();
         drainHandler = new Handler(drainThread.getLooper());
+        drainHandler.post(drainTask);
+    }
 
-        if (rolloverIoThread != null) { rolloverIoThread.quitSafely(); }
-        rolloverIoThread = new HandlerThread("GLRolloverIO");
-        rolloverIoThread.start();
-        rolloverIoHandler = new Handler(rolloverIoThread.getLooper());
-
-        drainHandler.post(new DrainRunnable());
+    private void startMuxerWithoutLateAudio() {
+        if (isStopped || !isRecording || muxerStarted || videoTrackIndex == -1 || mediaMuxer == null) return;
+        try {
+            mediaMuxer.start();
+            muxerStarted = true;
+            flushPreMuxerVideoBuffer();
+        } catch (RuntimeException failure) {
+            FLog.e(TAG, "Failed to start muxer via audio timeout", failure);
+        }
     }
 
     private final class DrainRunnable implements Runnable {
         @Override
         public void run() {
-            if (isStopped || !isRecording) return;
+            if (isStopped) return;
+            if (!isRecording) {
+                if (recordingFailure == null) drainHandler.postDelayed(this, 25);
+                return;
+            }
             // Drain audio FIRST — audio encoder has finite input buffers.
             // If the drain thread spends too much time on video (especially
             // at 4K+ max quality), audio output backs up, blocking EOS at
@@ -1585,103 +1518,13 @@ public class GLRecordingPipeline {
                 drainAudioEncoderWithBudget(16L, false); // doubled budget for audio priority
             }
             drainEncoder();
-            if (shouldSplitSegment()) {
-                // Stop writing to old muxer; handle I/O asynchronously so the
-                // drain loop keeps consuming encoder output.
-                muxerStarted = false;
-                rolloverRequestedByDrain = true;
-                rolloverIoHandler.post(() -> performAsyncRolloverIO());
-            }
+            if (!isStopped && isRecording) shouldSplitSegment();
             if (isRecording && !isStopped && drainHandler != null) {
                 drainHandler.postDelayed(this, 2); // 2ms instead of 10ms
             }
         }
     }
 
-    /**
-     * Phase 2 of async rollover: runs on the rollover I/O thread.
-     * Calls the SegmentCallback (SAF file creation), then posts Phase 3
-     * back to the drain handler to finalise the muxer.
-     */
-    private void performAsyncRolloverIO() {
-        try {
-            if (isStopped || !isRecording) {
-                rolloverRequestedByDrain = false;
-                return;
-            }
-            segmentNumber++;
-            if (segmentCallback == null) {
-                FLog.e(TAG, "Segment callback is null, cannot continue rollover");
-                rolloverRequestedByDrain = false;
-                return;
-            }
-            segmentCallback.onSegmentRollover(segmentNumber);
-
-            if (currentOutputFilePath == null && currentOutputFd == null) {
-                FLog.e(TAG, "Segment callback did not set new output");
-                rolloverRequestedByDrain = false;
-                return;
-            }
-            // Post Phase 3 back to the drain handler
-            drainHandler.post(this::completeAsyncRollover);
-        } catch (Exception e) {
-            FLog.e(TAG, "Error during async rollover I/O", e);
-            rolloverRequestedByDrain = false;
-        }
-    }
-
-    /**
-     * Phase 3 of async rollover: runs on the drain handler.
-     * Stops old muxer, creates new, re-adds cached tracks, starts.
-     */
-    private void completeAsyncRollover() {
-        try {
-            if (isStopped || !isRecording) {
-                rolloverRequestedByDrain = false;
-                return;
-            }
-
-            if (mediaMuxer != null) {
-                try {
-                    if (muxerStarted) mediaMuxer.stop();
-                    mediaMuxer.release();
-                } catch (Exception e) { FLog.e(TAG, "Error releasing muxer during async rollover", e); }
-                mediaMuxer = null;
-                muxerStarted = false;
-            }
-
-            audioTrackIndex = -1;
-            videoTrackIndex = -1;
-
-            // Reset byte counters
-            segmentBytesWritten = 0L;
-
-            setupMuxer();
-
-            if (cachedVideoFormat != null) {
-                videoTrackIndex = mediaMuxer.addTrack(cachedVideoFormat);
-            }
-            if (audioRecordingEnabled && cachedAudioFormat != null) {
-                audioTrackIndex = mediaMuxer.addTrack(cachedAudioFormat);
-            }
-
-            if (!audioRecordingEnabled && videoTrackIndex != -1 && !muxerStarted) {
-                mediaMuxer.start();
-                muxerStarted = true;
-            } else if (videoTrackIndex != -1 && audioTrackIndex != -1 && !muxerStarted) {
-                mediaMuxer.start();
-                muxerStarted = true;
-            }
-
-        } catch (Exception e) {
-            FLog.e(TAG, "Error during async rollover muxer setup", e);
-        } finally {
-            rolloverRequestedByDrain = false;
-            rolloverInProgress = false;
-        }
-    }
-
-    // Render when a new frame is available (signaled by renderer)
     private final Runnable renderRunnable = new Runnable() {
         @Override
         public void run() {
@@ -2163,6 +2006,7 @@ public class GLRecordingPipeline {
     }
 
     private void rolloverSegment() {
+        if (outputStopRequested || isStopped) return;
         try {
             FLog.i(TAG, "Auto-splitting: segment size limit reached, rolling over to next segment");
             FLog.d(TAG, "Current segment number: " + segmentNumber + ", rolling over to " + (segmentNumber + 1));
@@ -2186,20 +2030,19 @@ public class GLRecordingPipeline {
             // By fully stopping and releasing the old muxer HERE, the callback can safely
             // close the old PFD and then open the new PFD with no concurrent-open conflict,
             // guaranteeing the new fd is valid for the very first write.
-            if (mediaMuxer != null) {
+            final OutputTarget previous = outputTarget;
+            FragmentedMp4MuxerWrapper completed = mediaMuxer;
+            outputTarget = null; // Never fall back to the previous (already finalized) file.
+            if (completed != null) {
                 try {
-                    if (muxerStarted) {
-                        FLog.d(TAG, "Stopping current muxer before segment callback");
-                        mediaMuxer.stop();
-                    }
-                    FLog.d(TAG, "Releasing current muxer before segment callback");
-                    mediaMuxer.release();
-                } catch (Exception e) {
-                    FLog.e(TAG, "Error releasing muxer during rollover", e);
+                    completed.stop();
+                } finally {
+                    completed.release();
+                    mediaMuxer = null;
+                    muxerStarted = false;
                 }
-                mediaMuxer = null;
-                muxerStarted = false;
             }
+            if (isStopped || outputStopRequested || !isRecording) return;
 
             // Reset track indices
             audioTrackIndex = -1;
@@ -2216,7 +2059,9 @@ public class GLRecordingPipeline {
             }
 
             // Check if callback set the new output
-            if (currentOutputFilePath == null && currentOutputFd == null) {
+            if (isStopped || outputStopRequested || !isRecording) return;
+            if (outputTarget == null || outputTarget.segment != segmentNumber
+                    || sameDestination(previous, outputTarget)) {
                 FLog.e(TAG, "Segment callback did not set new output path or descriptor");
                 throw new IllegalStateException("No output path or descriptor set after callback");
             }
@@ -2282,16 +2127,21 @@ public class GLRecordingPipeline {
                 }
 
                 FLog.i(TAG, "Started new segment: " + segmentNumber +
-                        (currentOutputFilePath != null ? " at path: " + currentOutputFilePath
+                        (outputTarget.path != null ? " at path: " + outputTarget.path
                                 : " with file descriptor"));
                 rolloverInProgress = false;
             } catch (Exception e) {
                 FLog.e(TAG, "Error setting up muxer for new segment", e);
                 throw e; // Re-throw to be caught by outer try-catch
             }
+        } catch (OutputCancelledException ignored) {
+            // The preceding segment is already finalized; STOP won before the next opened.
         } catch (Exception e) {
             FLog.e(TAG, "Error during segment rollover", e);
-            stopRecording();
+            recordingFailure = new IllegalStateException("다음 녹화 파일을 준비하지 못했습니다.", e);
+            isRecording = false;
+            if (segmentCallback != null) segmentCallback.onOutputFailure();
+        } finally {
             rolloverInProgress = false;
         }
     }
@@ -2569,18 +2419,21 @@ public class GLRecordingPipeline {
             // stop log removed
         } catch (Throwable ignore) {
         }
-        if (isStopped || released) {
-            // stop log removed
-            return;
+        final boolean wasPreviewOnly;
+        synchronized (this) {
+            if (isStopped || released) return;
+            pendingHevcFormat = null;
+            capturedHevcCsd0 = null;
+            capturedHevcCsd1 = null;
+            wasPreviewOnly = !recordingStarted;
+            isStopped = true;
+            outputStopRequested = true;
+            released = true;
+            isRecording = false;
+            previewOnlyRendering = false;
         }
-        pendingHevcFormat = null;
-        capturedHevcCsd0 = null;
-        capturedHevcCsd1 = null;
-        boolean wasPreviewOnly = previewOnlyRendering && !isRecording;
-        isStopped = true;
-        released = true;
-        isRecording = false;
-        previewOnlyRendering = false;
+
+        cancelPhotoRequests();
 
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
@@ -2621,12 +2474,6 @@ public class GLRecordingPipeline {
         if (wasPreviewOnly) {
             quickReleaseForPreviewOnly();
             FLog.d(TAG, "GLRecordingPipeline preview-only stopped and released.");
-            // Reset flags so a new preview-only/recording session can start cleanly.
-            isStopped = false;
-            released = false;
-            isRecording = false;
-            recordingStartTimeNanos = -1;
-            recordingStartSystemTimeNanos = -1;
             return;
         }
 
@@ -2636,18 +2483,9 @@ public class GLRecordingPipeline {
         if (drainThread != null) {
             if (drainHandler != null) drainHandler.removeCallbacksAndMessages(null);
             drainThread.quitSafely();
-            try {
-                drainThread.join(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+            awaitDrainOwner(drainThread);
             drainThread = null;
             drainHandler = null;
-        }
-        if (rolloverIoThread != null) {
-            rolloverIoThread.quitSafely();
-            rolloverIoThread = null;
-            rolloverIoHandler = null;
         }
 
         // CRITICAL FIX: Drain encoders FIRST while GL thread is still alive
@@ -2670,13 +2508,6 @@ public class GLRecordingPipeline {
             renderThread = null;
         }
 
-        // Drain thread already stopped above — clean up rollover I/O thread here.
-        if (rolloverIoThread != null) {
-            rolloverIoThread.quitSafely();
-            rolloverIoThread = null;
-            rolloverIoHandler = null;
-        }
-
         // Now stop and release the video encoder
         if (videoEncoder != null) {
             try {
@@ -2696,25 +2527,7 @@ public class GLRecordingPipeline {
             }
         }
 
-        // BULLETPROOF: Stop and release the media muxer with emergency finalization
-        if (mediaMuxer != null && muxerStarted) {
-            // File-state snapshot BEFORE finalization — tells us if the output
-            // survived process churn (Xiaomi HyperOS stale-fd diagnosis, #332).
-            try {
-                StringBuilder st = new StringBuilder("[STORAGE] stopRecording output state:");
-                if (currentOutputFilePath != null) {
-                    java.io.File f = new java.io.File(currentOutputFilePath);
-                    st.append(" path=").append(currentOutputFilePath)
-                      .append(" exists=").append(f.exists())
-                      .append(" length=").append(f.exists() ? f.length() : -1);
-                } else {
-                    st.append(" path=null (fd mode) uri=").append(outputUri);
-                }
-                String msg = st.toString();
-                FLog.i(TAG, msg);
-            } catch (Exception ignored) {}
-            emergencyFinalizeMuxer();
-        }
+        if (mediaMuxer != null) emergencyFinalizeMuxer();
 
         // Release encoder input surface
         if (encoderInputSurface != null) {
@@ -2770,7 +2583,25 @@ public class GLRecordingPipeline {
         }
 
         // Input capture never owns playback focus or global output/call routing.
+        if (recordingFailure != null) throw recordingFailure;
+    }
 
+    static void awaitDrainOwner(Thread owner) {
+        if (owner == Thread.currentThread()) {
+            throw new IllegalStateException("인코더 작업이 자기 자신을 종료할 수 없습니다.");
+        }
+        boolean interrupted = false;
+        boolean warned = false;
+        while (owner.isAlive()) {
+            try {
+                owner.join(500);
+                if (owner.isAlive() && !warned) {
+                    FLog.w(TAG, "인코더 작업이 끝날 때까지 종료 상태를 유지합니다.");
+                    warned = true;
+                }
+            } catch (InterruptedException e) { interrupted = true; }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
     }
 
     private void quickReleaseForPreviewOnly() {
@@ -2838,7 +2669,10 @@ public class GLRecordingPipeline {
         handler = null;
         previewSurface = null;
         cameraInputSurface = null;
-        mediaMuxer = null;
+        if (mediaMuxer != null) {
+            mediaMuxer.release();
+            mediaMuxer = null;
+        }
         muxerStarted = false;
         audioTrackIndex = -1;
         videoTrackIndex = -1;
@@ -2978,15 +2812,7 @@ public class GLRecordingPipeline {
         // Set recording flag to true to resume encoding frames
         isRecording = true;
 
-        // CRITICAL: Restart the drain loop.  During pause the DrainRunnable
-        // stops re-posting itself (line 1489: !isRecording → return without
-        // postDelayed).  Without this, audio/video encoder output buffers
-        // back up, the audio encoder stops accepting input, and all new audio
-        // data after resume is silently lost — the recorded file has audio
-        // only up to the pause point.
-        if (drainHandler != null) {
-            startDrainLoop();
-        }
+        // The same drain owner remains alive while paused.
 
         // Force an IDR (keyframe) on the very next video frame so that ExoPlayer
         // can seek into the post-resume segment without showing a still frame.
@@ -3028,18 +2854,24 @@ public class GLRecordingPipeline {
      * @param fd       The FileDescriptor for the next segment (SAF), or null if
      *                 using internal storage
      */
-    public void setNextOutput(String filePath, FileDescriptor fd) {
-        this.currentOutputFilePath = filePath;
-        this.currentOutputFd = fd;
+    static boolean sameDestination(OutputTarget first, OutputTarget second) throws IOException {
+        if (first == null || second == null) return false;
+        if (first.path != null && second.path != null) {
+            return new java.io.File(first.path).getCanonicalFile()
+                    .equals(new java.io.File(second.path).getCanonicalFile());
+        }
+        return first.fd != null && (first.fd == second.fd
+                || (first.uri != null && first.uri.equals(second.uri)));
     }
 
-    /**
-     * Sets the SAF content URI for fd-based outputs, enabling hybrid
-     * finalization to re-open the file with a fresh fd if the original
-     * FUSE fd went stale (Xiaomi HyperOS process-death churn, issue #332).
-     */
-    public void setOutputUri(String uri) {
-        this.outputUri = uri;
+    public void requestOutputStop() {
+        outputStopRequested = true;
+    }
+
+    public boolean setNextOutput(OutputTarget target) {
+        if (isStopped || outputStopRequested || target.segment != segmentNumber) return false;
+        outputTarget = target;
+        return true;
     }
 
     /**
@@ -3743,27 +3575,23 @@ public class GLRecordingPipeline {
      * to handle gaps in frames gracefully.
      */
     public void renderBlackFrame() {
-        if (!isRecording || released) {
-            // Don't try to render if we're not recording or after release
-            return;
-        }
-
-        // Only use the existing renderer, don't try to recreate it
-        if (glRenderer != null && encoderInputSurface != null && encoderInputSurface.isValid()) {
+        final Handler renderHandler = handler;
+        final GLWatermarkRenderer renderer = glRenderer;
+        if (!isRecording || released || renderHandler == null || renderer == null
+                || !blackFrameQueued.compareAndSet(false, true)) return;
+        if (!renderHandler.post(() -> {
             try {
-                FLog.d(TAG, "Rendering black frame to maintain recording pipeline");
-                glRenderer.renderBlackFrame();
-                try {
-                    drainEncoder();
-                } catch (Exception e) {
-                    FLog.d(TAG, "Error draining encoder after black frame - continuing");
+                if (isRecording && !released && renderer == glRenderer
+                        && encoderInputSurface != null && encoderInputSurface.isValid()) {
+                    renderer.renderBlackFrame();
                 }
-            } catch (Exception e) {
-                FLog.d(TAG, "Could not render black frame - this is expected during camera disconnection");
+            } catch (RuntimeException e) {
+                FLog.w(TAG, "Could not render black frame during camera disconnection", e);
+            } finally {
+                blackFrameQueued.set(false);
             }
-        } else {
-            FLog.d(TAG, "Cannot render black frame - renderer or surface is null/invalid");
-        }
+        })) blackFrameQueued.set(false);
+        // The dedicated drain loop consumes this frame. Never dequeue from the fallback thread.
     }
 
     /**

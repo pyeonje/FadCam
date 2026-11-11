@@ -1282,7 +1282,7 @@ public class VideoPlayerActivity extends AppCompatActivity {
             // Use the actual playback URI (may be remuxed version for seeking support)
             Uri uriForPlayer = actualPlaybackUri != null ? actualPlaybackUri : videoUri;
             FLog.i(TAG, "initializePlayer() calling holder.setMediaIfNeeded for URI=" + uriForPlayer);
-            holder.setMediaIfNeeded(uriForPlayer);
+            holder.setMediaIfNeeded(uriForPlayer, this::ownsSharedPlayerView);
             // Set initial playback speed
             float initialSpeed = speedValues[currentSpeedIndex];
             FLog.d(TAG, "Setting initial playback speed to " + initialSpeed + "x");
@@ -1577,9 +1577,18 @@ public class VideoPlayerActivity extends AppCompatActivity {
      * where ExoPlayer's getDuration() returns TIME_UNSET.
      * Runs on background thread to avoid blocking UI.
      */
+    private static final java.util.concurrent.ThreadPoolExecutor DURATION_EXECUTOR =
+            new java.util.concurrent.ThreadPoolExecutor(1, 1, 0L,
+                    java.util.concurrent.TimeUnit.MILLISECONDS,
+                    new java.util.concurrent.ArrayBlockingQueue<>(1),
+                    new java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy());
+    private long durationGeneration;
+
     private void fetchCachedDuration(Uri uri) {
         if (uri == null) return;
-        new Thread(() -> {
+        final long generation = ++durationGeneration;
+        final androidx.media3.common.Player owner = player;
+        DURATION_EXECUTOR.execute(() -> {
             MediaMetadataRetriever retriever = null;
             try {
                 retriever = new MediaMetadataRetriever();
@@ -1591,7 +1600,8 @@ public class VideoPlayerActivity extends AppCompatActivity {
                         FLog.d(TAG, "Cached duration fetched via MediaMetadataRetriever: " + durationMs + "ms");
                         // Update slider max on UI thread if needed
                         runOnUiThread(() -> {
-                            if (isDestroyed() || !uri.equals(currentVideoUri)) return;
+                            if (isDestroyed() || generation != durationGeneration || owner != player
+                                    || !ownsSharedPlayerView() || !uri.equals(currentVideoUri)) return;
                             cachedDurationMs = durationMs;
                             try {
                                 // Don't update slider during scrubbing or grace period
@@ -1615,52 +1625,24 @@ public class VideoPlayerActivity extends AppCompatActivity {
                     } catch (Exception ignored) {}
                 }
             }
-        }).start();
+        });
     }
 
     // Save current position to prefs keyed by current media URI
 
     // Get file name from URI (Helper) - used for filename fallback when
     // saving/resuming
-    @SuppressLint("Range") // Suppress lint check for getColumnIndexOrThrow
     private String getFileName(Uri uri) {
-        if (this == null || uri == null) return null;
-        String result = null;
-        if ("content".equals(uri.getScheme())) {
-            try (
-                android.database.Cursor cursor = getContentResolver().query(
-                    uri,
-                    null,
-                    null,
-                    null,
-                    null
-                )
-            ) {
-                if (cursor != null && cursor.moveToFirst()) {
-                    int nameIndex = cursor.getColumnIndex(
-                        android.provider.OpenableColumns.DISPLAY_NAME
-                    );
-                    if (nameIndex != -1) {
-                        result = cursor.getString(nameIndex);
-                    }
-                }
-            } catch (Exception e) {
-                FLog.w(
-                    TAG,
-                    "Could not query display name for content URI: " + uri,
-                    e
-                );
-            }
+        if (uri == null) return null;
+        if (uri.equals(currentVideoUri) && getIntent() != null) {
+            String knownName = getIntent().getStringExtra("item_display_name");
+            if (knownName != null && !knownName.isEmpty()) return knownName;
         }
-        if (result == null) {
-            String path = uri.getPath();
-            if (path != null) {
-                int cut = path.lastIndexOf('/');
-                if (cut != -1) result = path.substring(cut + 1);
-                else result = path;
-            }
-        }
-        return result;
+        // Document IDs may contain a full decoded path; use only its final segment.
+        // Do not synchronously query a provider during playback or playback-state saves.
+        String segment = uri.getLastPathSegment();
+        if (segment == null) return null;
+        return segment.substring(segment.lastIndexOf('/') + 1);
     }
 
     private void saveCurrentPlaybackPosition() {
@@ -1836,7 +1818,7 @@ public class VideoPlayerActivity extends AppCompatActivity {
         GalleryViewerActions.bindEdit(this, findViewById(R.id.gallery_viewer_edit), item.uri, true);
         if (player != null) {
             player.setSeekParameters(SeekParameters.EXACT);
-            com.fadcam.playback.PlayerHolder.getInstance().setMediaIfNeeded(item.uri);
+            com.fadcam.playback.PlayerHolder.getInstance().setMediaIfNeeded(item.uri, this::ownsSharedPlayerView);
             player.seekTo(0L);
             applyMutedStateToPlayer(galleryPreviewMuted); player.play();
         }
@@ -3731,6 +3713,7 @@ public class VideoPlayerActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        durationGeneration++;
         stopTimelineUpdates(); timelineUpdateRunnable = null;
         stopWaveformUpdates(); waveformUpdateRunnable = null;
         detachPlayerListeners(); playbackUiListener = null; waveformPlayerListener = null;

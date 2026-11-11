@@ -46,4 +46,13 @@ public class SilentRecordingPermissionTest {
     @Test public void silentVideoPassesWithoutMicrophonePermission(){prefs.setRecordAudioEnabled(false);startToConfigurationBoundary(true);}
     @Test public void audibleVideoStillRequiresMicrophonePermission(){prefs.setRecordAudioEnabled(true);startToConfigurationBoundary(false);}
     @Test public void silentVideoStillRequiresCameraPermission(){prefs.setRecordAudioEnabled(false);Shadows.shadowOf(RuntimeEnvironment.getApplication()).denyPermissions(Manifest.permission.CAMERA);startToConfigurationBoundary(false);}
+
+    @Test public void pausedServiceDoesNotRequestSnapshotOrChangeSession() {
+        var pipeline = mock(com.fadcam.opengl.GLRecordingPipeline.class);
+        ReflectionHelpers.setField(service, "glRecordingPipeline", pipeline);
+        ReflectionHelpers.setField(service, "recordingState", RecordingState.PAUSED);
+        ReflectionHelpers.callInstanceMethod(service, "capturePhotoFromRecording");
+        verifyNoInteractions(pipeline);
+        assertEquals(RecordingState.PAUSED, ReflectionHelpers.getField(service, "recordingState"));
+    }
 }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="records_operation_busy">다른 파일 작업이 진행 중입니다. 완료 후 다시 시도하세요.</string>
+    <string name="photo_capture_paused">일시정지 중에는 사진을 찍을 수 없습니다. 녹화를 재개하세요.</string>
+    <string name="records_operation_cancel_counts">완료 %1$d개 · 실패 %2$d개 · 취소 %3$d개 · 미처리 %4$d개</string>
+</resources>

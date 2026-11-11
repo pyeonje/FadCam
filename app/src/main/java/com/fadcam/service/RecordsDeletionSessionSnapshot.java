@@ -36,6 +36,49 @@ public class RecordsDeletionSessionSnapshot {
     public int totalItemCount;
     public int completedItemCount;
     public int failedItemCount;
+    public int cancelledItemCount;
+    public int unprocessedItemCount;
+    public boolean cancellationRequested;
+    @Nullable public RecordsDeletionRequestItem inFlight;
+    @Nullable public String inFlightOutputUri;
+    @Nullable public Long inFlightVerifiedBytes;
+    public long inFlightStartedAtMs;
+    @NonNull public List<String> residualOutputUris = new ArrayList<>();
+
+    public boolean accepts(OperationKind kind, @Nullable String tree) {
+        return !cancellationRequested && operationKind == kind && java.util.Objects.equals(customTreeUri, tree);
+    }
+
+    @Nullable RecordsDeletionRequestItem claimNext() {
+        if (cancellationRequested || inFlight != null || pendingItems.isEmpty()) return null;
+        inFlight = pendingItems.remove(0);
+        inFlightStartedAtMs = System.currentTimeMillis();
+        return inFlight;
+    }
+
+    void recoverInterruptedClaim() {
+        if (inFlight == null) return;
+        // Provider outcomes are not necessarily observable. Never replay a potentially destructive claim.
+        if (inFlightOutputUri != null) residualOutputUris.add(inFlightOutputUri);
+        failedUriStrings.add(inFlight.uriString);
+        failedItemCount++;
+        errorSummaries.add("이전 작업이 중단되었습니다. 원본과 출력 파일을 확인하세요.");
+        inFlight = null;
+        inFlightOutputUri = null;
+        inFlightVerifiedBytes = null;
+        inFlightStartedAtMs = 0;
+    }
+
+    void finishRecoveredOperation(long bytes) {
+        if (inFlight == null) return;
+        completedUriStrings.add(inFlight.uriString);
+        completedItemCount++;
+        processedBytes += bytes;
+        inFlight = null;
+        inFlightOutputUri = null;
+        inFlightVerifiedBytes = null;
+        inFlightStartedAtMs = 0;
+    }
     public long totalBytes;
     public long processedBytes;
     @Nullable public String currentItemName;

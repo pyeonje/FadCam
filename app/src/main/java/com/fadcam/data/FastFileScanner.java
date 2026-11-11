@@ -62,33 +62,93 @@ public class FastFileScanner {
      * @param prefs SharedPreferencesManager to check storage mode & SAF URI
      * @return List of VideoIndexEntity for all discovered files
      */
-    @NonNull
-    public List<VideoIndexEntity> scanAll(@NonNull SharedPreferencesManager prefs) {
-        long start = System.currentTimeMillis();
+    static final class ScanResult {
+        final List<VideoIndexEntity> files;
+        final List<String> failedScopes;
+        final Uri tree;
+        final File internalRoot;
+        final String inspectedSafRootId;
 
-        String safUriString = prefs.getCustomStorageUri();
-        if (safUriString != null && !safUriString.isEmpty()) {
-            Uri safUri = Uri.parse(safUriString);
-            // Verify we still have permission
-            boolean hasPermission = false;
-            for (android.content.UriPermission p : context.getContentResolver().getPersistedUriPermissions()) {
-                if (p.getUri().equals(safUri) && p.isReadPermission()) {
-                    hasPermission = true;
-                    break;
-                }
-            }
-            if (hasPermission) {
-                List<VideoIndexEntity> safResults = scanSaf(safUri);
-                long elapsed = System.currentTimeMillis() - start;
-                return safResults;
-            }
-            FLog.w(TAG, "SAF URI set but no read permission, falling back to internal");
+        ScanResult(List<VideoIndexEntity> files, List<String> failedScopes, Uri tree, File internalRoot) {
+            this(files, failedScopes, tree, internalRoot, safeTreeId(tree));
         }
 
-        List<VideoIndexEntity> internalResults = scanInternal();
-        long elapsed = System.currentTimeMillis() - start;
-        FLog.i(TAG, "Internal scan complete: " + internalResults.size() + " files in " + elapsed + "ms");
-        return internalResults;
+        private ScanResult(List<VideoIndexEntity> files, List<String> failedScopes, Uri tree,
+                File internalRoot, String inspectedSafRootId) {
+            this.files = new ArrayList<>(files);
+            this.failedScopes = new ArrayList<>(failedScopes);
+            this.tree = tree;
+            this.internalRoot = internalRoot;
+            this.inspectedSafRootId = inspectedSafRootId;
+        }
+
+        private static String safeTreeId(Uri tree) {
+            if (tree == null) return null;
+            try { return DocumentsContract.getTreeDocumentId(tree); }
+            catch (IllegalArgumentException e) { return null; }
+        }
+
+        boolean coversMissing(String uriString) {
+            if (!failedScopes.isEmpty()) return false;
+            try {
+                Uri uri = Uri.parse(uriString);
+                if (tree != null) {
+                    String treeId = DocumentsContract.getTreeDocumentId(tree);
+                    if (!"content".equals(uri.getScheme())
+                            || !java.util.Objects.equals(tree.getAuthority(), uri.getAuthority())
+                            || !treeId.equals(DocumentsContract.getTreeDocumentId(uri))
+                            || inspectedSafRootId == null) return false;
+                    if (treeId.equals(inspectedSafRootId)) return true;
+                    // The selected tree can be broader than the recording root actually scanned.
+                    // Only the Android storage provider defines document IDs as volume:path.
+                    if (!"com.android.externalstorage.documents".equals(tree.getAuthority())) return false;
+                    return DocumentsContract.getDocumentId(uri).startsWith(inspectedSafRootId + "/");
+                }
+                return internalRoot != null && "file".equals(uri.getScheme()) && uri.getPath() != null
+                        && new File(uri.getPath()).getCanonicalPath()
+                                .startsWith(internalRoot.getCanonicalPath() + File.separator);
+            } catch (IllegalArgumentException | java.io.IOException ignored) {
+                return false;
+            }
+        }
+    }
+
+    @NonNull
+    public List<VideoIndexEntity> scanAll(@NonNull SharedPreferencesManager prefs) {
+        return scanWithStatus(prefs).files;
+    }
+
+    @NonNull
+    ScanResult scanWithStatus(@NonNull SharedPreferencesManager prefs) {
+        List<String> failures = java.util.Collections.synchronizedList(new ArrayList<>());
+        String safUriString = prefs.getCustomStorageUri();
+        Uri tree = safUriString == null || safUriString.isEmpty() ? null : Uri.parse(safUriString);
+        if (tree != null) {
+            try {
+                for (android.content.UriPermission p : context.getContentResolver().getPersistedUriPermissions()) {
+                    if (p.getUri().equals(tree) && p.isReadPermission()) {
+                        return scanSaf(tree, failures);
+                    }
+                }
+            } catch (RuntimeException e) {
+                FLog.w(TAG, "Cannot read configured storage grant", e);
+            }
+            // Existing internal fallback can discover files, but cannot attest to SAF deletions.
+            failures.add(tree.toString());
+        }
+        try {
+            File root = context.getExternalFilesDir(null);
+            if (root == null || !root.isDirectory() || root.list() == null) {
+                failures.add("internal-storage");
+                return new ScanResult(java.util.Collections.emptyList(), failures, tree, null);
+            }
+            File base = new File(root, Constants.RECORDING_DIRECTORY);
+            return new ScanResult(scanInternal(base, failures), failures, tree, base);
+        } catch (RuntimeException e) {
+            FLog.w(TAG, "Internal storage unavailable", e);
+            failures.add("internal-storage");
+            return new ScanResult(java.util.Collections.emptyList(), failures, tree, null);
+        }
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -96,16 +156,10 @@ public class FastFileScanner {
     // ════════════════════════════════════════════════════════════════
 
     @NonNull
-    private List<VideoIndexEntity> scanInternal() {
-        File recordsDir = context.getExternalFilesDir(null);
-        if (recordsDir == null) {
-            FLog.e(TAG, "ExternalFilesDir is null");
-            return new ArrayList<>();
-        }
-
-        File baseDir = new File(recordsDir, Constants.RECORDING_DIRECTORY);
-        if (!baseDir.exists() || !baseDir.isDirectory()) {
-            FLog.i(TAG, "Base directory does not exist: " + baseDir.getAbsolutePath());
+    private List<VideoIndexEntity> scanInternal(File baseDir, List<String> failures) {
+        if (!baseDir.exists()) return new ArrayList<>();
+        if (!baseDir.isDirectory()) {
+            failures.add(baseDir.getPath());
             return new ArrayList<>();
         }
 
@@ -122,6 +176,8 @@ public class FastFileScanner {
                 // Legacy dual folder mapped to CAMERA
                 scanInternalDirectory(results, new File(baseDir, Constants.RECORDING_SUBDIR_DUAL),
                         VideoItem.Category.CAMERA);
+            } catch (RuntimeException e) {
+                failures.add(e.getMessage() == null ? baseDir.getPath() : e.getMessage());
             } finally {
                 latch.countDown();
             }
@@ -132,6 +188,8 @@ public class FastFileScanner {
             try {
                 scanInternalDirectory(results, new File(baseDir, Constants.RECORDING_SUBDIR_SCREEN),
                         VideoItem.Category.SCREEN);
+            } catch (RuntimeException e) {
+                failures.add(e.getMessage() == null ? baseDir.getPath() : e.getMessage());
             } finally {
                 latch.countDown();
             }
@@ -142,6 +200,8 @@ public class FastFileScanner {
             try {
                 scanInternalDirectory(results, new File(baseDir, Constants.RECORDING_SUBDIR_FADITOR),
                         VideoItem.Category.FADITOR);
+            } catch (RuntimeException e) {
+                failures.add(e.getMessage() == null ? baseDir.getPath() : e.getMessage());
             } finally {
                 latch.countDown();
             }
@@ -152,6 +212,8 @@ public class FastFileScanner {
             try {
                 scanInternalDirectory(results, new File(baseDir, Constants.RECORDING_SUBDIR_STREAM),
                         VideoItem.Category.STREAM);
+            } catch (RuntimeException e) {
+                failures.add(e.getMessage() == null ? baseDir.getPath() : e.getMessage());
             } finally {
                 latch.countDown();
             }
@@ -164,6 +226,8 @@ public class FastFileScanner {
                         VideoItem.Category.SHOT);
                 scanInternalDirectory(results, new File(baseDir, Constants.RECORDING_SUBDIR_MINIAPPS),
                         VideoItem.Category.MINIAPPS);
+            } catch (RuntimeException e) {
+                failures.add(e.getMessage() == null ? baseDir.getPath() : e.getMessage());
             } finally {
                 latch.countDown();
             }
@@ -173,6 +237,8 @@ public class FastFileScanner {
         scanner.submit(() -> {
             try {
                 scanLegacyRoot(results, baseDir);
+            } catch (RuntimeException e) {
+                failures.add(e.getMessage() == null ? baseDir.getPath() : e.getMessage());
             } finally {
                 latch.countDown();
             }
@@ -182,9 +248,10 @@ public class FastFileScanner {
         latch.countDown(); // Adjust — we used 7 but only 6 submits (Camera+Dual share one)
 
         try {
-            latch.await(30, TimeUnit.SECONDS);
+            if (!latch.await(30, TimeUnit.SECONDS)) failures.add(baseDir.getPath());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            failures.add(baseDir.getPath());
             FLog.w(TAG, "Scan interrupted");
         }
         scanner.shutdown();
@@ -196,10 +263,11 @@ public class FastFileScanner {
      * Recursively scan a category directory (handles subdirectories like Camera/Back, Shot/Selfie, etc.)
      */
     private void scanInternalDirectory(List<VideoIndexEntity> out, File directory, VideoItem.Category category) {
-        if (!directory.exists() || !directory.isDirectory()) return;
+        if (!directory.exists()) return;
+        if (!directory.isDirectory()) throw new IllegalStateException(directory.getPath());
 
         File[] children = directory.listFiles();
-        if (children == null) return;
+        if (children == null) throw new IllegalStateException(directory.getPath());
 
         for (File child : children) {
             if (child == null) continue;
@@ -233,7 +301,7 @@ public class FastFileScanner {
         }
 
         File[] files = subdir.listFiles();
-        if (files == null) return;
+        if (files == null) throw new IllegalStateException(subdir.getPath());
 
         for (File file : files) {
             if (file == null) continue;
@@ -248,7 +316,7 @@ public class FastFileScanner {
 
     private void scanLegacyRoot(List<VideoIndexEntity> out, File baseDir) {
         File[] files = baseDir.listFiles();
-        if (files == null) return;
+        if (files == null) throw new IllegalStateException(baseDir.getPath());
 
         for (File file : files) {
             if (file == null || !file.isFile()) continue;
@@ -331,8 +399,9 @@ public class FastFileScanner {
     // ════════════════════════════════════════════════════════════════
 
     @NonNull
-    private List<VideoIndexEntity> scanSaf(@NonNull Uri treeUri) {
+    private ScanResult scanSaf(@NonNull Uri treeUri, List<String> failures) {
         List<VideoIndexEntity> results = new ArrayList<>();
+        String inspectedRootId = null;
 
         try {
             // The SAF tree URI points directly to the recording directory
@@ -340,65 +409,87 @@ public class FastFileScanner {
             // creates Camera/, Screen/, etc. subdirectories directly inside it).
             DocumentFile treeDoc = DocumentFile.fromTreeUri(context, treeUri);
             if (treeDoc == null) {
-                FLog.e(TAG, "Failed to open tree URI");
-                return results;
+                failures.add(treeUri.toString());
+                return new ScanResult(results, failures, treeUri, null, null);
             }
 
             // Use the tree root directly as the recording root.
             // Fallback: check if there's a "FadCam" subdirectory (some setups may
             // point to a parent directory containing a FadCam folder).
-            DocumentFile recordingRoot = treeDoc;
-            DocumentFile fadCamChild = treeDoc.findFile(Constants.RECORDING_DIRECTORY);
-            if (fadCamChild != null && fadCamChild.isDirectory()) {
-                FLog.d(TAG, "Found FadCam subdirectory under tree, using it as root");
+            Uri recordingRoot = treeDoc.getUri();
+            java.util.Map<String, Uri> folders = listSafFolders(recordingRoot);
+            Uri fadCamChild = folders.get(Constants.RECORDING_DIRECTORY);
+            if (fadCamChild != null) {
                 recordingRoot = fadCamChild;
-            } else {
+                folders = listSafFolders(recordingRoot);
             }
 
-            // Scan each known subdirectory
-            scanSafCategory(results, recordingRoot, Constants.RECORDING_SUBDIR_CAMERA, VideoItem.Category.CAMERA);
-            scanSafCategory(results, recordingRoot, Constants.RECORDING_SUBDIR_DUAL, VideoItem.Category.CAMERA);
-            scanSafCategory(results, recordingRoot, Constants.RECORDING_SUBDIR_SCREEN, VideoItem.Category.SCREEN);
-            scanSafCategory(results, recordingRoot, Constants.RECORDING_SUBDIR_FADITOR, VideoItem.Category.FADITOR);
-            scanSafCategory(results, recordingRoot, Constants.RECORDING_SUBDIR_STREAM, VideoItem.Category.STREAM);
-            scanSafCategory(results, recordingRoot, Constants.RECORDING_SUBDIR_SHOT, VideoItem.Category.SHOT);
-            scanSafCategory(results, recordingRoot, Constants.RECORDING_SUBDIR_MINIAPPS, VideoItem.Category.MINIAPPS);
+            inspectedRootId = DocumentsContract.getDocumentId(recordingRoot);
+
+            scanSafCategory(results, folders.get(Constants.RECORDING_SUBDIR_CAMERA), VideoItem.Category.CAMERA);
+            scanSafCategory(results, folders.get(Constants.RECORDING_SUBDIR_DUAL), VideoItem.Category.CAMERA);
+            scanSafCategory(results, folders.get(Constants.RECORDING_SUBDIR_SCREEN), VideoItem.Category.SCREEN);
+            scanSafCategory(results, folders.get(Constants.RECORDING_SUBDIR_FADITOR), VideoItem.Category.FADITOR);
+            scanSafCategory(results, folders.get(Constants.RECORDING_SUBDIR_STREAM), VideoItem.Category.STREAM);
+            scanSafCategory(results, folders.get(Constants.RECORDING_SUBDIR_SHOT), VideoItem.Category.SHOT);
+            scanSafCategory(results, folders.get(Constants.RECORDING_SUBDIR_MINIAPPS), VideoItem.Category.MINIAPPS);
 
             // Root-level legacy files
-            scanSafDirectoryFiles(results, recordingRoot.getUri(), VideoItem.Category.UNKNOWN,
+            scanSafDirectoryFiles(results, recordingRoot, VideoItem.Category.UNKNOWN,
                     VideoItem.ShotSubtype.UNKNOWN, VideoItem.CameraSubtype.UNKNOWN, VideoItem.FaditorSubtype.UNKNOWN,
                     true);
 
         } catch (Exception e) {
+            failures.add(e.getMessage() == null ? treeUri.toString() : e.getMessage());
             FLog.e(TAG, "SAF scan error", e);
         }
 
-        return results;
+        return new ScanResult(results, failures, treeUri, null, inspectedRootId);
     }
 
-    private void scanSafCategory(List<VideoIndexEntity> out, DocumentFile fadCamRoot,
-                                 String subdirName, VideoItem.Category category) {
-        DocumentFile subdir = fadCamRoot.findFile(subdirName);
-        if (subdir == null || !subdir.isDirectory()) return;
+    private java.util.Map<String, Uri> listSafFolders(Uri root) {
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(root, DocumentsContract.getDocumentId(root));
+        java.util.Map<String, Uri> folders = new java.util.HashMap<>();
+        try (Cursor cursor = context.getContentResolver().query(children, new String[] {
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE}, null, null, null)) {
+            requireCompleteCursor(cursor, children);
+            while (cursor.moveToNext()) {
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(2))) {
+                    folders.put(cursor.getString(1), DocumentsContract.buildDocumentUriUsingTree(root, cursor.getString(0)));
+                }
+            }
+        }
+        return folders;
+    }
 
-        if (category == VideoItem.Category.SHOT || category == VideoItem.Category.CAMERA
-                || category == VideoItem.Category.FADITOR) {
-            // These have sub-subdirectories (Back, Front, Selfie, etc.)
-            scanSafWithSubdirectories(out, subdir, category);
-        } else {
-            scanSafDirectoryFiles(out, subdir.getUri(), category,
-                    VideoItem.ShotSubtype.UNKNOWN, VideoItem.CameraSubtype.UNKNOWN,
-                    VideoItem.FaditorSubtype.UNKNOWN, false);
+    private static void requireCompleteCursor(Cursor cursor, Uri scope) {
+        if (cursor == null || (cursor.getExtras() != null &&
+                (cursor.getExtras().getBoolean(DocumentsContract.EXTRA_LOADING)
+                        || cursor.getExtras().containsKey(DocumentsContract.EXTRA_ERROR)))) {
+            throw new IllegalStateException(scope.toString());
         }
     }
 
-    private void scanSafWithSubdirectories(List<VideoIndexEntity> out, DocumentFile categoryDir,
+    private void scanSafCategory(List<VideoIndexEntity> out, Uri subdir, VideoItem.Category category) {
+        if (subdir == null) return;
+        if (category == VideoItem.Category.SHOT || category == VideoItem.Category.CAMERA
+                || category == VideoItem.Category.FADITOR) {
+            scanSafWithSubdirectories(out, subdir, category);
+        } else {
+            scanSafDirectoryFiles(out, subdir, category, VideoItem.ShotSubtype.UNKNOWN,
+                    VideoItem.CameraSubtype.UNKNOWN, VideoItem.FaditorSubtype.UNKNOWN, false);
+        }
+    }
+
+    private void scanSafWithSubdirectories(List<VideoIndexEntity> out, Uri categoryDir,
                                            VideoItem.Category category) {
         // Use ContentResolver to list children (both files and dirs)
         ContentResolver cr = context.getContentResolver();
         Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-                categoryDir.getUri(),
-                DocumentsContract.getDocumentId(categoryDir.getUri()));
+                categoryDir,
+                DocumentsContract.getDocumentId(categoryDir));
 
         try (Cursor cursor = cr.query(childrenUri,
                 new String[]{
@@ -410,7 +501,7 @@ public class FastFileScanner {
                 },
                 null, null, null)) {
 
-            if (cursor == null) return;
+            requireCompleteCursor(cursor, childrenUri);
 
             while (cursor.moveToNext()) {
                 String docId = cursor.getString(0);
@@ -433,19 +524,19 @@ public class FastFileScanner {
                         fadSub = inferFaditorSubtypeFromFolder(name);
                     }
 
-                    Uri subdirUri = DocumentsContract.buildDocumentUriUsingTree(categoryDir.getUri(), docId);
+                    Uri subdirUri = DocumentsContract.buildDocumentUriUsingTree(categoryDir, docId);
                     scanSafDirectoryFiles(out, subdirUri, category, shotSub, camSub, fadSub, false);
                 } else {
                     // It's a file at category root level
                     VideoIndexEntity entity = buildEntityFromSafCursor(
-                            categoryDir.getUri(), docId, name, mimeType, size, lastMod,
+                            categoryDir, docId, name, mimeType, size, lastMod,
                             category, VideoItem.ShotSubtype.UNKNOWN,
                             VideoItem.CameraSubtype.UNKNOWN, VideoItem.FaditorSubtype.UNKNOWN);
                     if (entity != null) out.add(entity);
                 }
             }
         } catch (Exception e) {
-            FLog.e(TAG, "Error scanning SAF subdirectories for " + category, e);
+            throw new IllegalStateException(childrenUri.toString(), e);
         }
     }
 
@@ -475,7 +566,7 @@ public class FastFileScanner {
                 },
                 null, null, null)) {
 
-            if (cursor == null) return;
+            requireCompleteCursor(cursor, childrenUri);
 
             while (cursor.moveToNext()) {
                 String childDocId = cursor.getString(0);
@@ -512,7 +603,7 @@ public class FastFileScanner {
                 if (entity != null) out.add(entity);
             }
         } catch (Exception e) {
-            FLog.e(TAG, "Error listing SAF directory files", e);
+            throw new IllegalStateException(childrenUri.toString(), e);
         }
     }
 

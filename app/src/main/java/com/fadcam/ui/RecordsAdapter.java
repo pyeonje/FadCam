@@ -335,6 +335,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
             return;
         }
         RecordViewHolder holder = (RecordViewHolder) viewHolder;
+        clearThumbnail(holder);
         // --- 0. Handle Skeleton Mode ---
         if (isSkeletonMode) {
             bindSkeletonItem(holder, position);
@@ -576,7 +577,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
 
         // Only set the thumbnail if holder view is visible (important optimization)
         if (holder.imageViewThumbnail != null && holder.itemView.getVisibility() == View.VISIBLE) {
-            setThumbnail(holder, videoUri);
+            setThumbnail(holder, videoItem);
         }
 
         // --- Last-viewed progress bar handling (optimized with caching) ---
@@ -990,112 +991,50 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         }
     }
 
-    // Update the setThumbnail method to consider scrolling state with caching
-    private void setThumbnail(RecordViewHolder holder, Uri videoUri) {
-        if (holder.imageViewThumbnail == null || context == null)
-            return;
-        // Honor user preference: hide thumbnails if requested
-        try {
-            if (sharedPreferencesManager != null && sharedPreferencesManager.isHideThumbnailsEnabled()) {
-                // Hide the thumbnail view and show a lightweight placeholder background
-                holder.imageViewThumbnail.setImageResource(R.drawable.ic_video_placeholder);
-                holder.imageViewThumbnail.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                return;
-            }
-        } catch (Exception ignored) {
-        }
+    private final java.util.Set<RecordViewHolder> thumbnailHolders =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
-        // Skip Glide loading for skeleton URIs
-        if ("skeleton".equals(videoUri.getScheme())) {
+    private void clearThumbnail(RecordViewHolder holder) {
+        com.bumptech.glide.RequestManager manager = holder.thumbnailRequestManager;
+        holder.thumbnailRequestManager = null;
+        if (manager != null && holder.imageViewThumbnail != null) {
+            manager.clear(holder.imageViewThumbnail);
+        }
+        thumbnailHolders.remove(holder);
+    }
+
+    static com.bumptech.glide.load.Key thumbnailSignature(VideoItem item) {
+        // Glide uses a SHA-256 disk key over the model, signature and transformation.
+        return new com.bumptech.glide.signature.ObjectKey(
+                "fadcam-thumbnail-v2:" + item.size + ":" + item.lastModified + ":" + item.uri);
+    }
+
+    private void setThumbnail(RecordViewHolder holder, VideoItem item) {
+        if (holder.imageViewThumbnail == null || context == null) return;
+        clearThumbnail(holder);
+        if ((sharedPreferencesManager != null && sharedPreferencesManager.isHideThumbnailsEnabled())
+                || "skeleton".equals(item.uri.getScheme())) {
             holder.imageViewThumbnail.setImageResource(R.drawable.ic_video_placeholder);
+            holder.imageViewThumbnail.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
             return;
         }
 
-        String uriString = videoUri.toString();
-
-        // Try to get cached thumbnail first
-        byte[] cachedThumbnail = com.fadcam.utils.VideoSessionCache.getThumbnailWithFallback(context, uriString);
-        if (cachedThumbnail != null) {
-            // Load from cache - instant display
-            try {
-                android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(cachedThumbnail, 0,
-                        cachedThumbnail.length);
-                if (bitmap != null) {
-                    holder.imageViewThumbnail.setImageBitmap(bitmap);
-                    holder.imageViewThumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                    return;
-                }
-            } catch (Exception e) {
-                FLog.w(TAG, "Error loading cached thumbnail", e);
-            }
-        }
-
-        // Lower resolution during scrolling for performance
-        int thumbnailSize;
-        if (safeMediaProbeMode) {
-            thumbnailSize = isScrolling ? SAFE_SCROLL_THUMBNAIL_SIZE : SAFE_THUMBNAIL_SIZE;
-        } else {
-            thumbnailSize = isScrolling ? 100 : THUMBNAIL_SIZE;
-        }
-
-        // Create optimized request options with different strategies based on scrolling
+        int size = safeMediaProbeMode
+                ? (isScrolling ? SAFE_SCROLL_THUMBNAIL_SIZE : SAFE_THUMBNAIL_SIZE)
+                : (isScrolling ? 100 : THUMBNAIL_SIZE);
         RequestOptions options = new RequestOptions()
-                .diskCacheStrategy(DiskCacheStrategy.ALL)
-                .skipMemoryCache(false)
-                .centerCrop()
-                .override(thumbnailSize, thumbnailSize)
+                .signature(thumbnailSignature(item))
+                .diskCacheStrategy(DiskCacheStrategy.RESOURCE)
+                .centerCrop().override(size, size)
                 .placeholder(R.drawable.ic_video_placeholder)
                 .error(R.drawable.ic_video_placeholder);
-
-        if (isScrolling) {
-            // During scrolling, use low-quality thumbnails for speed
-            options = options.dontAnimate();
-        }
-
-        // Load with Glide and cache the result
-        Glide.with(context)
-                .asBitmap()
-                .load(videoUri)
-                .apply(options)
-                .thumbnail(
-                        Glide.with(context)
-                                .asBitmap()
-                                .load(videoUri)
-                                .apply(options)
-                                .override(96, 96))
-                .into(new com.bumptech.glide.request.target.CustomTarget<android.graphics.Bitmap>() {
-                    @Override
-                    public void onResourceReady(@NonNull android.graphics.Bitmap resource,
-                            @androidx.annotation.Nullable com.bumptech.glide.request.transition.Transition<? super android.graphics.Bitmap> transition) {
-                        // Set the image
-                        holder.imageViewThumbnail.setImageBitmap(resource);
-                        holder.imageViewThumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
-
-                        // Cache the thumbnail for future use
-                        executorService.execute(() -> {
-                            try {
-                                java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
-                                resource.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, baos);
-                                byte[] thumbnailData = baos.toByteArray();
-
-                                // Cache in memory and disk
-                                com.fadcam.utils.VideoSessionCache.cacheThumbnail(uriString, thumbnailData);
-                                com.fadcam.utils.VideoSessionCache.saveThumbnailToDisk(context, uriString,
-                                        thumbnailData);
-
-                            } catch (Exception e) {
-                                FLog.w(TAG, "Error caching thumbnail", e);
-                            }
-                        });
-                    }
-
-                    @Override
-                    public void onLoadCleared(
-                            @androidx.annotation.Nullable android.graphics.drawable.Drawable placeholder) {
-                        // Set placeholder if load is cleared
-                        holder.imageViewThumbnail.setImageResource(R.drawable.ic_video_placeholder);
-                    }
-                });
+        holder.imageViewThumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        thumbnailHolders.add(holder);
+        // The ImageView target owns the request, including failure/clear and bitmap lifetime.
+        holder.thumbnailRequestManager = Glide.with(holder.imageViewThumbnail);
+        holder.thumbnailRequestManager.asBitmap().load(item.uri)
+                .apply(isScrolling ? options.dontAnimate() : options)
+                .into(holder.imageViewThumbnail);
     }
 
     // Override onViewRecycled to cancel thumbnail loading for recycled views
@@ -1106,9 +1045,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         RecordViewHolder holder = (RecordViewHolder) viewHolder;
 
         // Cancel any pending image loads when view is recycled
-        if (holder.imageViewThumbnail != null && context != null) {
-            Glide.with(context).clear(holder.imageViewThumbnail);
-        }
+        clearThumbnail(holder);
         holder.itemView.setScaleX(1f);
         holder.itemView.setScaleY(1f);
     }
@@ -1129,7 +1066,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                         && entries.get(position) instanceof VideoItemEntry) {
                     VideoItem videoItem = ((VideoItemEntry) entries.get(position)).item;
                     if (videoItem != null && videoItem.uri != null) {
-                        setThumbnail(holder, videoItem.uri);
+                        setThumbnail(holder, videoItem);
                     }
                 }
                 return;
@@ -1239,6 +1176,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
     @Override
     public void onDetachedFromRecyclerView(@NonNull androidx.recyclerview.widget.RecyclerView recyclerView) {
         super.onDetachedFromRecyclerView(recyclerView);
+        for (RecordViewHolder holder : new ArrayList<>(thumbnailHolders)) clearThumbnail(holder);
         try {
             if (receiverRegisteredContext != null) {
                 receiverRegisteredContext.unregisterReceiver(playbackPositionReceiver);
@@ -2682,6 +2620,7 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
     // --- ViewHolder ---
     // --- Updated ViewHolder ---
     static class RecordViewHolder extends RecyclerView.ViewHolder {
+        com.bumptech.glide.RequestManager thumbnailRequestManager;
         /** The URI of the item currently bound to this holder — used to detect stale async callbacks. */
         String currentUri;
         ImageView imageViewThumbnail;

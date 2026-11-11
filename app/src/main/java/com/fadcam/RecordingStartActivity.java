@@ -27,11 +27,8 @@ public class RecordingStartActivity extends Activity {
         
         try {
             SharedPreferencesManager sharedPreferencesManager = SharedPreferencesManager.getInstance(this);
-            // Both permissions are required by the upstream recording engine, even for muted video.
-            boolean missingPermissions = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-                    != PackageManager.PERMISSION_GRANTED
-                    || ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                    != PackageManager.PERMISSION_GRANTED;
+            boolean missingPermissions = !com.fadcam.utils.RecordingPermissions.canRecord(
+                    this, sharedPreferencesManager.isRecordAudioEnabled());
             if (missingPermissions || !sharedPreferencesManager.sharedPreferences
                     .getBoolean(Constants.COMPLETED_ONBOARDING_KEY, false)) {
                 openingSetup = true;

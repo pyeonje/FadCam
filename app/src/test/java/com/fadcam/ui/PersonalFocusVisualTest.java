@@ -14,6 +14,9 @@ import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import org.junit.Test;
+import org.junit.Before;
+import org.junit.After;
+import org.junit.runner.RunWith;
 import org.robolectric.*;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
@@ -23,7 +26,11 @@ import org.robolectric.util.ReflectionHelpers;
  * No camera pixels or physical device are inspected. */
 @Config(sdk=35,application=android.app.Application.class,qualifiers="w1040dp-h480dp-land-xxhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-public class PersonalFocusVisualTest extends PersonalHomePreviewTest {
+@RunWith(RobolectricTestRunner.class)
+public class PersonalFocusVisualTest {
+    private final PersonalHomePreviewTest fixture = new PersonalHomePreviewTest();
+    @Before public void setup() { fixture.setup(); }
+    @After public void cleanup() { fixture.cleanup(); }
     private void measure(View root) {
         root.measure(View.MeasureSpec.makeMeasureSpec(3120,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(1440,View.MeasureSpec.EXACTLY));root.layout(0,0,3120,1440);
     }
@@ -39,7 +46,7 @@ public class PersonalFocusVisualTest extends PersonalHomePreviewTest {
     @Test public void realInflatedHomeDispatchSwitchesAfToMfAndCapturesCenterMulti() throws Exception {
         File folder=Files.createTempDirectory("fadcam-focus-visual-").toFile();
         System.out.println("Focus visual evidence: "+folder.getAbsolutePath());
-        PersonalHomeFragment fragment=ReflectionHelpers.getField(this,"fragment");RecordingService service=ReflectionHelpers.getField(this,"service");
+        PersonalHomeFragment fragment=ReflectionHelpers.getField(fixture,"fragment");RecordingService service=ReflectionHelpers.getField(fixture,"service");
         ReflectionHelpers.setField(service,"previewOnlyActive",true);ReflectionHelpers.callInstanceMethod(fragment,"render");
         View root=fragment.requireView();
         CameraManager manager=(CameraManager)fragment.requireContext().getSystemService(android.content.Context.CAMERA_SERVICE);

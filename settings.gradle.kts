@@ -48,7 +48,27 @@ val media3PatchedPath = if (file("local.properties").exists()) {
     "/tmp/media3-patched"
 }
 
-if (file(media3PatchedPath).exists()) {
+val media3Dir = file(media3PatchedPath)
+check(media3Dir.isDirectory) { "고정 Media3 작업 사본이 없습니다. local.properties의 media3.patched.path를 확인하세요." }
+val buildLock = groovy.json.JsonSlurper().parse(file("personal-build.lock.json")) as Map<*, *>
+val expectedMedia3Commit = buildLock["media3Commit"] as? String
+check(expectedMedia3Commit?.matches(Regex("[0-9a-f]{40}")) == true) { "Media3 커밋 잠금값이 올바르지 않습니다." }
+fun media3Git(vararg args: String): String = try {
+    providers.exec {
+        workingDir(media3Dir)
+        commandLine(listOf("git", "--no-optional-locks") + args)
+    }.standardOutput.asText.get().trim()
+} catch (e: Exception) {
+    throw GradleException("고정 Media3 Git 작업 사본을 확인하지 못했습니다.", e)
+}
+check(media3Git("rev-parse", "--show-prefix").isEmpty() &&
+        media3Git("rev-parse", "HEAD") == expectedMedia3Commit) {
+    "Media3 커밋이 personal-build.lock.json의 잠금값과 다릅니다."
+}
+check(media3Git("status", "--porcelain=v1", "--untracked-files=all").isEmpty()) {
+    "고정 Media3 작업 사본에 커밋되지 않은 변경이 있습니다. 변경을 보존한 채 깨끗한 사본을 지정하세요."
+}
+run {
     includeBuild(media3PatchedPath) {
         dependencySubstitution {
             substitute(module("androidx.media3:media3-muxer")).using(project(":lib-muxer"))
@@ -56,8 +76,4 @@ if (file(media3PatchedPath).exists()) {
             substitute(module("androidx.media3:media3-container")).using(project(":lib-container"))
         }
     }
-} else {
-    logger.warn("⚠️ Patched Media3 not found at: $media3PatchedPath")
-    logger.warn("📥 Clone it with: git clone --depth 1 https://github.com/anonfaded/media3-patched.git $media3PatchedPath")
 }
- 

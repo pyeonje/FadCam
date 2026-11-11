@@ -23,6 +23,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Size;
@@ -317,7 +318,7 @@ public class DualCameraRecordingService extends Service {
      * 4. Create pipeline + start encoding
      */
     private void handleStartDualRecording() {
-        if (state != DualCameraState.DISABLED) {
+        if (isStopping || state != DualCameraState.DISABLED) {
             FLog.w(TAG, "Cannot start dual recording — state=" + state);
             return;
         }
@@ -389,7 +390,6 @@ public class DualCameraRecordingService extends Service {
         config = prefs.getDualCameraConfig();
         recordingHaptics.beginSession();
         state = DualCameraState.INITIALIZING;
-        isStopping = false;
         camerasOpened = 0;
 
         // ── Foreground notification ───────────────────────────────────
@@ -405,7 +405,8 @@ public class DualCameraRecordingService extends Service {
     /**
      * Stop dual camera recording and clean up all resources.
      */
-    private void handleStopDualRecording() {
+    private synchronized void handleStopDualRecording() {
+        if (isStopping) return;
         if (durationLimitController != null && durationLimitController.stopSession()) {
             FLog.d(TAG, "Cancelled maximum recording duration for current dual session");
         }
@@ -423,53 +424,22 @@ public class DualCameraRecordingService extends Service {
         useBlackFrameFallback = false;
         isCapturingSnapshot = false;
 
-        // Stop pipeline first (drains encoders, finalises muxer)
-        if (recordingPipeline != null) {
-            try {
-                recordingPipeline.stopRecording();
-            } catch (Exception e) {
-                FLog.e(TAG, "Error stopping pipeline", e);
-            }
-            recordingPipeline = null;
-        }
-
-        // Destroy watermark sensor providers
         if (watermarkManager != null) {
             watermarkManager.destroy();
             watermarkManager = null;
         }
-
-        // Close cameras
-        closeCamera(primarySession, primaryCameraDevice, "primary");
-        closeCamera(secondarySession, secondaryCameraDevice, "secondary");
-        primarySession = null;
-        primaryCameraDevice = null;
-        secondarySession = null;
-        secondaryCameraDevice = null;
-
-        // Close SAF file descriptor if used
-        if (safRecordingPfd != null) {
-            try {
-                safRecordingPfd.close();
-                FLog.d(TAG, "Closed SAF ParcelFileDescriptor");
-            } catch (Exception e) {
-                FLog.e(TAG, "Error closing ParcelFileDescriptor", e);
-            }
-            safRecordingPfd = null;
-            safRecordingUri = null;
-            safOutputFileName = null;
-        }
-
-        prefs.setRecordingInProgress(false);
-        releaseWakeLock();
-        clearRecordingTimelineState();
-        pauseStartedAt = 0;
-        accumulatedPausedDurationMs = 0;
-
-        broadcastRecordingComplete(true);
-        lastRecordingUriString = null;
-        broadcastAction(Constants.BROADCAST_ON_DUAL_RECORDING_STOPPED);
-        stopSelf();
+        releasePipelineAndCamerasAsync(saved -> {
+            prefs.setRecordingInProgress(false);
+            releaseWakeLock();
+            clearRecordingTimelineState();
+            pauseStartedAt = 0;
+            accumulatedPausedDurationMs = 0;
+            broadcastRecordingComplete(saved);
+            if (!saved) Toast.makeText(this, R.string.personal_recording_save_failed, Toast.LENGTH_LONG).show();
+            lastRecordingUriString = null;
+            broadcastAction(Constants.BROADCAST_ON_DUAL_RECORDING_STOPPED);
+            stopSelf();
+        });
     }
 
     private void handlePauseDualRecording() {
@@ -757,7 +727,12 @@ public class DualCameraRecordingService extends Service {
     }
 
     private void handleCapturePhoto() {
-        if (recordingPipeline == null || (state != DualCameraState.RECORDING && state != DualCameraState.PAUSED)) {
+        if (state == DualCameraState.PAUSED) {
+            mainHandler.post(() -> Toast.makeText(getApplicationContext(),
+                    R.string.photo_capture_paused, Toast.LENGTH_SHORT).show());
+            return;
+        }
+        if (recordingPipeline == null || state != DualCameraState.RECORDING) {
             mainHandler.post(() -> Toast.makeText(getApplicationContext(),
                     R.string.photo_capture_preview_unavailable, Toast.LENGTH_SHORT).show());
             return;
@@ -1577,25 +1552,52 @@ public class DualCameraRecordingService extends Service {
         fallbackMode = false;
         isCapturingSnapshot = false;
 
-        if (recordingPipeline != null) {
-            try {
-                recordingPipeline.stopRecording();
-            } catch (Exception e) {
-                FLog.e(TAG, "Error stopping pipeline on destroy", e);
-            }
-            recordingPipeline = null;
-        }
-
-        closeCamera(primarySession, primaryCameraDevice, "primary");
-        closeCamera(secondarySession, secondaryCameraDevice, "secondary");
-        primarySession = null;
-        primaryCameraDevice = null;
-        secondarySession = null;
-        secondaryCameraDevice = null;
+        isStopping = true;
+        releasePipelineAndCamerasAsync(null);
 
         state = DualCameraState.DISABLED;
         sessionsConfigured = 0;
         camerasOpened = 0;
+    }
+
+    private synchronized void releasePipelineAndCamerasAsync(java.util.function.Consumer<Boolean> finished) {
+        final GLRecordingPipeline pipeline = recordingPipeline;
+        final ParcelFileDescriptor fd = safRecordingPfd;
+        final CameraCaptureSession primary = primarySession;
+        final CameraCaptureSession secondary = secondarySession;
+        final CameraDevice primaryDevice = primaryCameraDevice;
+        final CameraDevice secondaryDevice = secondaryCameraDevice;
+        recordingPipeline = null;
+        safRecordingPfd = null;
+        safRecordingUri = null;
+        safOutputFileName = null;
+        primarySession = null;
+        secondarySession = null;
+        primaryCameraDevice = null;
+        secondaryCameraDevice = null;
+        Runnable release = () -> {
+            boolean success = true;
+            try {
+                if (pipeline != null) pipeline.stopRecording();
+            } catch (RuntimeException e) {
+                success = false;
+                FLog.e(TAG, "Error stopping pipeline", e);
+            } finally {
+                closeCamera(primary, primaryDevice, "primary");
+                closeCamera(secondary, secondaryDevice, "secondary");
+                if (fd != null) {
+                    try { fd.close(); }
+                    catch (Exception e) {
+                        success = false;
+                        FLog.e(TAG, "Error closing recording descriptor", e);
+                    }
+                }
+            }
+            final boolean saved = success;
+            if (finished != null) mainHandler.post(() -> finished.accept(saved));
+        };
+        if (pipeline == null) release.run();
+        else new Thread(release, "DualRecordingFinalization").start();
     }
 
     private void initializeDurationLimitController() {
@@ -1684,6 +1686,7 @@ public class DualCameraRecordingService extends Service {
     // ── Error handling ────────────────────────────────────────────────
 
     private void transitionToError(@NonNull String reason) {
+        if (isStopping) return;
         DualCameraState previousState = state;
         FLog.e(TAG, "Dual camera error: " + reason);
         state = DualCameraState.ERROR;

@@ -1,0 +1,967 @@
+{
+  "head": "4283201eee8cb1c0f9f9f52191e6dace5ce777e0",
+  "source_identity": {
+    "head": "4283201eee8cb1c0f9f9f52191e6dace5ce777e0",
+    "tracked_diff_sha256": "ab3b2d04e12ce9535e40e574844c47b060f4166b1c70a98927778c2cee3d290c",
+    "source_delta_manifest_sha256": "ab681bc73e88027a8f5f499004905dbdfea51392b0df2a8cb24ca9d036194770",
+    "files": [
+      {
+        "path": "app/libs/droiduvc-0.2.1.aar",
+        "bytes": 1474180,
+        "sha256": "a44a5dcb2be88318ebf4032e90e484192d3976eb19e299d2b516ae7d70fb1da0"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/RecordingStartActivity.java",
+        "bytes": 5220,
+        "sha256": "851f634eee24b8fb90e95195fd1f44063d392980d9bb8354a413eeae442df0dd"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/data/FastFileScanner.java",
+        "bytes": 34668,
+        "sha256": "6c790b1d788e68aae9f5d609cae40630aa24b24f228d6b57a370fd6a470cb315"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/data/VideoIndexRepository.java",
+        "bytes": 27575,
+        "sha256": "1d998a5cd182e710d6cdf29d9a88d7c2f8502ad22357c1479575b75ba7546ca3"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/dualcam/service/DualCameraRecordingService.java",
+        "bytes": 89409,
+        "sha256": "0dd92e455930ae59adb659647143c0288aed6e1bee311adf69bb4403206f0799"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/media/FragmentedMp4MuxerWrapper.java",
+        "bytes": 66585,
+        "sha256": "3f566a5bd7b796a1a494ed8d81fda7aa3a74e48584d044fa27cbe74d085e4c22"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/opengl/GLRecordingPipeline.java",
+        "bytes": 180149,
+        "sha256": "72339f385dcd8fd68f6c0b191eba3d738580560f7f0dc27e81a8fad88f2da859"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/opengl/GLWatermarkRenderer.java",
+        "bytes": 142809,
+        "sha256": "e87e96130a8becb02340cfeeafe115341cc79467387cbf37d2875aaa105832eb"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/playback/PlayerHolder.java",
+        "bytes": 17840,
+        "sha256": "790325bfb39e3e06bddc9858cd34c22a47e3c9ddfebf4e8144047025036fa31a"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/playback/SeekableFragmentedMp4MediaSourceFactory.java",
+        "bytes": 22562,
+        "sha256": "18a363fa65056e21c523f204b4a0cf7ba37c5f52da6954a2dd8a4e9efdfb981b"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/service/RecordsDeletionNotificationManager.java",
+        "bytes": 12338,
+        "sha256": "aecac500b25a2860830581a0e27a87f35750bd5ad41f2d427b300637f085024e"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/service/RecordsDeletionService.java",
+        "bytes": 40513,
+        "sha256": "94cc2415c10b0f481f3afe40c6c25140c4ed57e42821aa27ae071115b9312004"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/service/RecordsDeletionSessionSnapshot.java",
+        "bytes": 6421,
+        "sha256": "9ee217a64e68af9bbf2f9bbd1525c4b587e1d00464f0d9e689ee8dfa3d280245"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/service/RecordsDeletionSessionStore.java",
+        "bytes": 1778,
+        "sha256": "c4ea22e04b9582beb3844466054b0640a9950d04c7299a8ecb5f49e827b9be1c"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/services/RecordingService.java",
+        "bytes": 402001,
+        "sha256": "3f3437a422d9cbecc5ec084629ce0008ca526e8a56ad9740664abbf26d0a55b8"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/ui/PersonalHomeFragment.java",
+        "bytes": 54822,
+        "sha256": "7f55cbbd7db2f9305959d5dacf65ff521dbafbbe637b5c60c6f072d3249460d1"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/ui/RecordsAdapter.java",
+        "bytes": 165575,
+        "sha256": "3fa5f0ca2fa88868e0fc0f4eaa3d71aede929cc79fcbddfbb669897989a3e108"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/ui/RecordsFragment.java",
+        "bytes": 312351,
+        "sha256": "99c068fdd7484dcebe047c2e700e8722810a281a1622c506f6817219dbe65814"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/ui/UsbCameraActivity.java",
+        "bytes": 31161,
+        "sha256": "e468c29a86466e4ee81958c0c47705fe3feb5446fceef14f37d477065008479d"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/ui/VideoPlayerActivity.java",
+        "bytes": 208099,
+        "sha256": "dd17c3541f2a46fcc0b3d6c339adbaf82c6f1122656c32c5cb5bfb0072ec25db"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/utils/RecordingPermissions.java",
+        "bytes": 760,
+        "sha256": "847c4c0331e42db856b02b41f62dad5391596f98013367a1d9033bd4e3b5f396"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/utils/TrashManager.java",
+        "bytes": 52756,
+        "sha256": "1e1043a5b93d215970fdf98a2b3f1fda78257ba3e389ef6dc9d7e1c0f728a32a"
+      },
+      {
+        "path": "app/src/main/java/com/fadcam/utils/VideoSessionCache.java",
+        "bytes": 17262,
+        "sha256": "59be01717ee9560346578fad6d02adc955d1a5b4e172fb7e0944b9b6ddb73f7d"
+      },
+      {
+        "path": "app/src/main/res/values-ko/gallery_strings.xml",
+        "bytes": 939,
+        "sha256": "76fe55fcbdd76f458067c0dc89f27595cb7361effd26132e024b694c41c77f13"
+      },
+      {
+        "path": "app/src/main/res/values-ko/strings_recording_storage.xml",
+        "bytes": 141,
+        "sha256": "607269e7a3bfdb3c4a6c51e850626e1c23a1bd11278154e30c392632d98cebaf"
+      },
+      {
+        "path": "app/src/main/res/values-ko/strings_usb_camera.xml",
+        "bytes": 2034,
+        "sha256": "d2525f18fc27a32008ab9cfd5404612ec79d1b03570e48b8a3bf63ceb1ce2aca"
+      },
+      {
+        "path": "app/src/main/res/values/file_operation_fixes.xml",
+        "bytes": 461,
+        "sha256": "9425b1b08f044eae9ecd99130881ef2ce1ae80912779b9719920b1fd61add526"
+      },
+      {
+        "path": "app/src/main/res/values/gallery_strings.xml",
+        "bytes": 923,
+        "sha256": "03b0926f28f8b7dd8795a48aee21c06c797297ec61cd46f1a78139826f938cbe"
+      },
+      {
+        "path": "app/src/main/res/values/strings_recording_storage.xml",
+        "bytes": 126,
+        "sha256": "86d2bad3394f74f279f13cbde113e030a868a785f7afd7a68fba1556bc7f5f52"
+      },
+      {
+        "path": "app/src/main/res/values/strings_usb_camera.xml",
+        "bytes": 1781,
+        "sha256": "8101ff67e13aba66f842578697537b834f7a66cced93461be8e53c8e028df381"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/RecordingToggleActivityTest.java",
+        "bytes": 7597,
+        "sha256": "6928358dd55c9bcb72ce3fcd9aa33f46b32c2281f3cbe5b3d9b33cf60738cab6"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/data/VideoIndexIncompleteScanTest.java",
+        "bytes": 3760,
+        "sha256": "066468522c1d7e3c26a01acd31c09499ada6a0c74699799f7c6e5edf95808fc9"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/media/FragmentedMp4WriteRecoveryTest.java",
+        "bytes": 4441,
+        "sha256": "39e37976e7ff3bc17f7ef1c6034c8907eaf758cd2d724423aea6585a3a8aea2a"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/opengl/PhotoOffscreenOwnershipTest.java",
+        "bytes": 4224,
+        "sha256": "21008f13e077ab8c25843e4352f9bf1b4bcf2f1af3c4beee7341e125b32dd90e"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/opengl/RecordingOutputOwnershipTest.java",
+        "bytes": 4937,
+        "sha256": "6fca899897de869bd81bd120a7417c733a375686b234cc29216539eef9a21c88"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/playback/GallerySourcePreparationTest.java",
+        "bytes": 10753,
+        "sha256": "3b15e6b87eaf5ff5484ef31b597cc8f23fb20caa1c34700632362227c6b7a9a5"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/service/RecordsDeletionSessionTransactionTest.java",
+        "bytes": 3239,
+        "sha256": "8566474cfb2281abd1d815f11832995f9afbcf6b80d55a02fe8ae28922af5ad8"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/services/RecordingSafSegmentGuardTest.java",
+        "bytes": 1594,
+        "sha256": "19e7642a95f0df0d9a51c0c2deb90ac80c6af820794dcdc82b09a953d9b4869a"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/ui/GalleryThumbnailSignatureTest.java",
+        "bytes": 3289,
+        "sha256": "b3e8528e03579f34b46191300966c1fb236f78e3181558ef0ceba3b9cf08fb57"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/ui/PersonalFocusVisualTest.java",
+        "bytes": 5566,
+        "sha256": "6745f88c50f166321fbfc7a1fae1977f2550cfbf346bb666ee4975586fb5de93"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/ui/PersonalHomePreviewTest.java",
+        "bytes": 99116,
+        "sha256": "b241c22afff46660f9188c4c9a93d7f0298d3903d1f94625d72bf6af66d33dfa"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/ui/UsbCameraIntegrationTest.java",
+        "bytes": 7663,
+        "sha256": "a7c7c57d2cb4fff39700cba92553299687082c4ff94d95efb94c8da5fa65af9d"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/ui/UsbCameraLifecycleTest.java",
+        "bytes": 16987,
+        "sha256": "f7558792ef0dec4896582fe8a623f8cadfb9fb99e5e44c191a790bff4245c50f"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/utils/SilentRecordingPermissionTest.java",
+        "bytes": 3400,
+        "sha256": "d9925d3b1706439891ec5e9e414ee48a1e9f8c9264c19149e39156df5b7752ef"
+      },
+      {
+        "path": "app/src/test/java/com/fadcam/utils/TrashManagerTransactionTest.java",
+        "bytes": 4093,
+        "sha256": "b85ce8ad4d8d446d4160e971a67ac6fb114438e7f1e383c0984b7debdabf9ba2"
+      },
+      {
+        "path": "gradle/gradle-daemon-jvm.properties",
+        "bytes": 71,
+        "sha256": "a8da0ab41ba65c239b4f892a37b712fca4a96f5d31322537e22e4c2922919189"
+      },
+      {
+        "path": "personal-build.lock.json",
+        "bytes": 313,
+        "sha256": "93f3936ac9a2d16c5f92bc8e16d37fac032e36ebe271c32b7c5165568fd16056"
+      },
+      {
+        "path": "settings.gradle.kts",
+        "bytes": 3507,
+        "sha256": "f8c55fb3bf0494e65b3df7379629645dbb8cc67dd0cf7923e3aec7cdf54d6bed"
+      },
+      {
+        "path": "tools/check_native_alignment.py",
+        "bytes": 2911,
+        "sha256": "7e361a0edfd6c9c911913ad3fd2be7a428a7750c85680266a13c22e2bc04d9ee"
+      },
+      {
+        "path": "tools/test_native_alignment.py",
+        "bytes": 1779,
+        "sha256": "c82c4f8218a0ea5afeea7bb7103195aa69528cb2b8176e0a1ce1a43723efa449"
+      }
+    ]
+  },
+  "environment": {
+    "BUILD_TOOLS": "35.0.0",
+    "GRADLE": "8.13",
+    "JAVA": "17.0.20.1",
+    "AGP": "8.13.1",
+    "compile_sdk": 36,
+    "target_sdk": 36,
+    "min_sdk": 24,
+    "media3_commit": "51c6a4f96d4dc08d421682d96ecc5a044ea1decb",
+    "media3_composite_dependency_graph": {
+      "muxer": true,
+      "common": true,
+      "container": true
+    },
+    "uvc_aar_sha256": "a44a5dcb2be88318ebf4032e90e484192d3976eb19e299d2b516ae7d70fb1da0"
+  },
+  "test_execution": {
+    "status": "통과",
+    "new_execution": true,
+    "totals": {
+      "tests": 311,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 311
+    },
+    "classes": [
+      {
+        "class": "com.fadcam.data.VideoIndexIncompleteScanTest",
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "de8647a9a32c5ccf2079b5ca1fda2e3e1f622a898e91df9b60fc7bff33b491cf",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.media.FragmentedMp4WriteRecoveryTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "82a7d388075c12391a966d5b4c44700cba1e18bde5fc925d51a97e6649ebd671",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.opengl.AudioEosTimelineTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "c66f85a15e25d220a8cf24bdda086a9fca7daf9b971855452cfdc11bc45aad11",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.opengl.PhotoOffscreenOwnershipTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "9d3db22a78bbd13fd1d30cde6af84ec39868492da1376d527b1449d37e439dde",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.opengl.PreviewDisplayContinuityTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "6d542d9b68d2ff29aa19ac8498e6a0519733daca7bbbd3fb2d856c5cfa2c8852",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.opengl.RecordingOutputOwnershipTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "fea1bf4aed6228475b740344203ffdd04a9545f2fecbe7f691b917067eb6031d",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.opengl.VideoEncoderConfigurationTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "e84afc646b03fd4a2581b1cb30f7f3ad17a0700f31e6a2548e8de0311a1a0086",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.PersonalCameraFullscreenTest",
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "9f8c3ef710212a6bf7a722efe9466d1d81d117d41bd8b542d85a224cc6d2c9f1",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.playback.GallerySourcePreparationTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "dafc80e0449402a0d041adfc33e8df417ebcc6c624ee1d1b702dfc98e11e5a2a",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.RecordingSavedSettingsTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "93cdf5470251ffe6a9894483c7699ad6b6ebe85d707e531b89da3a62537ab5f0",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.RecordingToggleActivityTest",
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "a429707339d6fa8fab8d55d60794d78690eae7d8abee004be324e38c56f90f3d",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.service.GalleryMediaPublisherTest",
+        "tests": 12,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "51180db7c901bfaecc5ed4961536dc4a4479d65bdcc0fd81db82011cada53263",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.service.RecordsDeletionSessionTransactionTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "204d9315966bbfd1212aa8a5e3692de4a6d1ac7a87f6353024563c61d536386b",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.services.RecordingSafSegmentGuardTest",
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "975e209084dbe1662cd9228b0a739dbd927dc63c3585878d9ac2d712eadd2d64",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.shortcuts.PersonalAppearanceShortcutsTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "9cb0d95cdb416282ac75ddf7687d669de98321b41f89992189f2d9ddb8bba7bf",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.AnimatedSelectionTitleTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "a374d25c18e14bb1c2c639f57aa1ceb4d549ca45f55e84e67d1243b7a4efa95c",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryEntryPolicyTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "0ad77a7c79e94b34634ec5fbe0b1781c9809fe854e3ac13a79f1504221316e73",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryExternalAppsTest",
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "e25923a5f6f1f0e1a2621058f392d5e7ad7dc661397e39d2f31887f70285fb78",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryFilmstripReuseTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "8ec90354a673f1bc22a430c6cd5799b4ac835173adeda4e2e843ea1e7caa04dd",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryGridPinchTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "9fb81383c061babad6af19a203b20226a3f3eaef702a52af02481cbf29330e1e",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryInteractionContinuityTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "7512763ba925c4813e6afb4c428f97b1abb9bb3b89f78883a49422717dc707c4",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryPlayerOwnershipTest",
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "1362891f1a7c2ddc963f37a3103b1cee3143ecc456b020f8bc5a9570cd0c2d3d",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryPreviewLifecycleTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "652d92766c282dfdf48886532b26964dcbb904500633bcb4ab6a3aecc92c2a3e",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryReturnContinuityTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "e6b2e4e6d4a572d3433c428f1eea4aa59b96aafbdc10a3440a1bc402321fce73",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryRotationTest",
+        "tests": 14,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "e1e1b4245fb67fdae0199e8e2cf4a74465b075fd4236c1e18aa1ea9a78c7f351",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GallerySeekBoundaryTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "a91709f176df1654b0c78d65cf60628b7e930d0de205eef340271c2547068897",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GallerySelectedTimelineBoundsTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "76cde5aad19a82d453745eefdf416cb6da8f5dec7c4b7d261fda530ac939d533",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GallerySelectionActionsTest",
+        "tests": 7,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "e04221bef83db0af67bcbc6e097f4b0a98b959d9af249d3f05f0cffd970eaa35",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GallerySurfaceDispatchTest",
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "36913e9187f33b446c260472eaea877d4d9d2ff57acb2a89d13b03de0175b5fe",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.GalleryThumbnailSignatureTest",
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "c565def99f6801dd83956c36df083757e65d4391df0a64f40f66e3c640cbba36",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.PersonalFocusVisualTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "b931edd0f5f2c53f5f99e191219fdf1b1db3ad2b9059f785ee71c8e388079aa1",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.PersonalHomePreviewTest",
+        "tests": 58,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "7f2f18a4b28fc458ce94fa9e8ceda00d2952e64203ea4ead4f2657c5545da267",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.PersonalLensRasterTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "0776f64d9c6ee5e2c8740d2801418e9518947bcf616fb920f5477a4f1afab5f1",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.PersonalLensSelectorTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "62d848a41a10d9ec65c9e0e0878ed55af82ca0e6cb728b814550d2b2f3f8304e",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.PersonalManualFocusControlsTest",
+        "tests": 8,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "355c03d7f2b2f2d17e4349c90eb253a8c7b8e50637164e1fd1c160da0a689506",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.PersonalQuickFunctionTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "0c0beb932e93dac79aa286881831d0220d6f15fc4e752dddf83aec57f8f7b514",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.PersonalQuickGlyphRasterTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "6e7433135323b6654d1fb6121ca5a6e719fac578dec66345d81ebd013eab2454",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.RecentMediaLauncherTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "c97e7eae8504010f0e0a769ad989652974eeac17161fb82da3b39dd68b311478",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.SamsungGalleryPresentationTest",
+        "tests": 10,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "ebdc04154cf0318193ba061083d5c48ce7af93e4913ea6bbc5bf815e298eb92f",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.SamsungGallerySafeUiTest",
+        "tests": 7,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "d81cdb02086eebd0ea063036a3b6237165be9a08a28bf52d87a6ada473133c23",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.SamsungGalleryTimeLayoutTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "0ebc66e8062263f5fa39ebc691ff5e0c653143eb8e5e156785be421cb51e1983",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.SamsungGalleryViewerTest",
+        "tests": 21,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "d3752e77b5c9f2bc0c7215d54edbface77602d5aba60e2514d320ebd3cab4e64",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.UsbCameraEntryTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "b1d3d8a7ef231f2b6926afef2dd29936421b20e5de0e785c9fb647757078ba2b",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.UsbCameraIntegrationTest",
+        "tests": 8,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "c3e5fc5d06ed6e0cf7ac64478aef6c9ba51f52d45043817ebbdb1188bf5b4b49",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.ui.UsbCameraLifecycleTest",
+        "tests": 11,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "001aec790bfeba08a80444a76292dbcd097e31e5f26958db50b8c0607aa0ea95",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.CameraDisplayOrientationTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "b7e7abfa8b286406f5899a1e9ed675ca5196f20704c58b00a3017085399acbeb",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.CameraLensCatalogTest",
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "9749b72b69426879a3a080c2d7fe1fc9e01e350111ff4c2a76c478f3bf2ba8d3",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.PersonalProSettingsTest",
+        "tests": 17,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "a8e02ec1857e7050ef71ecab71d88406faa11cec87f3403868adc6fdbea91118",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.PersonalRecordingOrientationTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "3bd2febdb74f7cae572db0b9a9399815e20befffc32873512394d65e12ab1fe7",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.RecordingAudioRoutingTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "cfb80a303e2a7d9d42927ae449145417ad95529a9d52eb4806dc05324fd57606",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.RecordingFocusRequestTest",
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "78794232dbf3b9b7caa2046b476b1d3cd1f74e15cac332ee788fb08bea8f1fdb",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.RecordingHapticsTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "b76fb1556658611191ad60e4b6a57128485a6cca0a1a80127d609754e21658c2",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.SelfHealingLiveSessionGuardTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "1685a4dc7ea843534c60cf29d53c9a11c5b0fb3151f70c9f32ad9fb14b789b99",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.SilentRecordingPermissionTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "f2c45bf40839c613d0c159053bd1bf57943ed2d893ebe3ff8f6e54010f1efc16",
+        "failed_cases": []
+      },
+      {
+        "class": "com.fadcam.utils.TrashManagerTransactionTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xml_sha256": "c6ee695d4fed16b07b1ea43f4d12fc65c508f38d03e9eae22243b2a17f8006fa",
+        "failed_cases": []
+      }
+    ],
+    "red": {
+      "trash_metadata_failure": 1,
+      "obsolete_usb_permission_and_focus": 2
+    },
+    "python_native_fixtures_passed": 2
+  },
+  "build": {
+    "success": true,
+    "apk": {
+      "file": "FadCam-fixes-120f535043a6.apk",
+      "sha256": "120f535043a6fc65e64d5b850c4d5a2a7f7b7b2570c6a590c26d9c1f42e16a71",
+      "bytes": 83164983,
+      "name": "com.pyeonje.fadcam.beta",
+      "versionCode": "52",
+      "versionName": "4.0.0-beta10.6",
+      "abi": "arm64-v8a",
+      "min_sdk": "24",
+      "target_sdk": "36",
+      "native_libraries": [
+        {
+          "library": "lib/arm64-v8a/libavcodec.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libavdevice.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libavfilter.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libavformat.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libavutil.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libc++_shared.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libdroiduvc.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libffmpegkit.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libffmpegkit_abidetect.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libimage_processing_util_jni.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libopencv_java4.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libsurface_util_jni.so",
+          "load_alignments": [
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libswresample.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        },
+        {
+          "library": "lib/arm64-v8a/libswscale.so",
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "elf_16kb": true,
+          "zip_16kb": true
+        }
+      ],
+      "zipalign_16KiB": true,
+      "signer_sha256": "c9da6360eab3ca46d9b7959646a3bcd61c4e8bea933354819cf2b3d8bad9fea6",
+      "signature_verified": true,
+      "signer_matches_historical_phone_candidate": true,
+      "installed": false
+    }
+  },
+  "physical_device_tested": false,
+  "device_installation_performed": false,
+  "real_recording_mp4_tested": false,
+  "emulator_started": false,
+  "published": false,
+  "logs": {
+    "fix-final.log": "d00861dd8031547c3fba61176e940d8f3b1b560580837cf9ff58708754a5b86d",
+    "fix-dependencies.log": "0b4303888d57c4fd3e4a940aa571f8d2d309b80cfcbd22d1d0415f6f9e8c4444",
+    "fix-red.log": "b132a6fc6f4982394641325e9b520df18a0c154c3ac19c79ec3bba62ceb80751",
+    "fix-usb-red.log": "babb64af143967637c259e79cd1f0ed204eb042d19898e24949a59a699616965"
+  }
+}

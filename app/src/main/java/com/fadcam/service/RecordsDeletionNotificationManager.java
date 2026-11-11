@@ -62,7 +62,10 @@ public class RecordsDeletionNotificationManager {
         }
         Notification notification = baseBuilder(snapshot)
                 .setContentTitle(title)
-                .setContentText(buildCompletionSummaryText(snapshot))
+                .setContentText(snapshot.state == RecordsDeletionSessionSnapshot.State.CANCELLED
+                        ? context.getString(R.string.records_operation_cancel_counts, snapshot.completedItemCount,
+                                snapshot.failedItemCount, snapshot.cancelledItemCount, snapshot.unprocessedItemCount)
+                        : buildCompletionSummaryText(snapshot))
                 .setSmallIcon(snapshot.state == RecordsDeletionSessionSnapshot.State.COMPLETED_SUCCESS
                         ? R.drawable.ic_check_circle
                         : R.drawable.ic_error)

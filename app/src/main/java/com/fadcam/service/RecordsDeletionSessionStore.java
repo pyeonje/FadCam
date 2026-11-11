@@ -29,8 +29,19 @@ public class RecordsDeletionSessionStore {
         return snapshot == null ? new RecordsDeletionSessionSnapshot() : snapshot;
     }
 
-    public synchronized void write(@NonNull RecordsDeletionSessionSnapshot snapshot) {
-        prefs.edit().putString(KEY_SNAPSHOT_JSON, RecordsDeletionSessionSnapshot.toJson(snapshot)).apply();
+    public synchronized boolean write(@NonNull RecordsDeletionSessionSnapshot snapshot) {
+        return write(snapshot, null);
+    }
+
+    synchronized boolean write(RecordsDeletionSessionSnapshot snapshot, @Nullable String requestId) {
+        SharedPreferences.Editor edit = prefs.edit()
+                .putString(KEY_SNAPSHOT_JSON, RecordsDeletionSessionSnapshot.toJson(snapshot));
+        if (requestId != null) edit.putBoolean("request:" + requestId, true);
+        return edit.commit();
+    }
+
+    synchronized boolean alreadyAccepted(@Nullable String requestId) {
+        return requestId != null && prefs.contains("request:" + requestId);
     }
 
     public synchronized void clear() {

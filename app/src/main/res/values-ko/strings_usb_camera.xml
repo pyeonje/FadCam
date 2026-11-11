@@ -13,4 +13,13 @@
     <string name="usb_camera_saved">FadCam 갤러리에 사진을 저장했습니다</string>
     <string name="usb_camera_photo_failed">사진을 저장하지 못했습니다</string>
     <string name="usb_camera_modes">해상도 / 프레임 속도</string>
+    <string name="usb_camera_unknown_device">USB 카메라</string>
+    <string name="usb_camera_allow_camera">카메라 권한 허용</string>
+    <string name="usb_camera_retry">다시 연결</string>
+    <string name="usb_camera_camera_required">USB 카메라를 사용하려면 카메라 권한을 허용하세요</string>
+    <string name="usb_camera_camera_denied">카메라 권한이 허용되지 않았습니다</string>
+    <string name="usb_camera_focus_unavailable">초점 조절을 사용할 수 없습니다</string>
+    <string name="usb_camera_manual_focus">수동 초점</string>
+    <string name="usb_camera_switch_to_mf">자동 초점. 수동 초점으로 전환</string>
+    <string name="usb_camera_switch_to_af">수동 초점. 자동 초점으로 전환</string>
 </resources>

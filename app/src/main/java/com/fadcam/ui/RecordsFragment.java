@@ -653,7 +653,9 @@ public class RecordsFragment extends BaseFragment implements
             if (snapshot.state == RecordsDeletionSessionSnapshot.State.CANCELLED) {
                 deletionDockTitle.animateSlot(getFinishedCancelledTitle(snapshot), 300);
                 deletionDockIcon.setImageResource(R.drawable.ic_error);
-                deletionDockCurrentItem.setText(getFinishedBodyPartial(snapshot));
+                deletionDockCurrentItem.setText(getString(R.string.records_operation_cancel_counts,
+                        snapshot.completedItemCount, snapshot.failedItemCount,
+                        snapshot.cancelledItemCount, snapshot.unprocessedItemCount));
             } else if (snapshot.state == RecordsDeletionSessionSnapshot.State.COMPLETED_SUCCESS) {
                 deletionDockTitle.animateSlot(getFinishedSuccessTitle(snapshot), 300);
                 deletionDockIcon.setImageResource(R.drawable.ic_check_circle);
@@ -3255,7 +3257,7 @@ public class RecordsFragment extends BaseFragment implements
 
         if (isInSelectionMode) {
             int count = selectedUris.size();
-            String newTitle = count > 0 ? count + " selected" : getString(R.string.gallery_select);
+            String newTitle = count > 0 ? getResources().getQuantityString(R.plurals.gallery_selected_count, count, count) : getString(R.string.gallery_select);
             if (titleText instanceof com.fadcam.ui.utils.AnimatedTextView) {
                 ((com.fadcam.ui.utils.AnimatedTextView) titleText).animateSlot(newTitle, 300);
             } else {
@@ -3917,7 +3919,7 @@ public class RecordsFragment extends BaseFragment implements
         setChipLabelWithCount(chipFilterStream, R.string.records_filter_stream, stream);
         setChipLabelWithCount(chipFilterShot, R.string.records_filter_shot, shot);
         if (chipFilterMiniApps != null) {
-            chipFilterMiniApps.animateSlot(makeChipLabel("Mini Apps", miniapps), 300);
+            chipFilterMiniApps.animateSlot(makeChipLabel(getString(R.string.gallery_mini_apps), miniapps), 300);
         }
 
         reorderFilterChipsByCount(camera, screen, faditor, stream, shot, miniapps);
@@ -4583,15 +4585,17 @@ public class RecordsFragment extends BaseFragment implements
                 ));
             }
         }
-        pendingCustomExportUris.clear();
-
         if (requestItems.isEmpty()) {
             Toast.makeText(requireContext(), R.string.records_delete_error_invalid_item, Toast.LENGTH_SHORT).show();
             return;
         }
 
         // Use RecordsDeletionService for consistent dock UI and progress tracking
-        RecordsDeletionService.startExportSession(requireContext(), requestItems, treeUri);
+        if (!RecordsDeletionService.startExportSession(requireContext(), requestItems, treeUri)) {
+            Toast.makeText(requireContext(), R.string.records_operation_busy, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        pendingCustomExportUris.clear();
         syncDeletionUiFromStore(false);
         Toast.makeText(requireContext(),
                 getString(R.string.records_batch_save_queued, requestItems.size()),
@@ -4806,7 +4810,7 @@ public class RecordsFragment extends BaseFragment implements
             case FADITOR: return getString(R.string.records_filter_faditor);
             case STREAM: return getString(R.string.records_filter_stream);
             case SHOT: return getString(R.string.records_filter_shot);
-            case MINIAPPS: return "Mini Apps";
+            case MINIAPPS: return getString(R.string.gallery_mini_apps);
             case ALL: return getString(R.string.gallery_pictures);
             default: return getString(R.string.gallery_other);
         }
