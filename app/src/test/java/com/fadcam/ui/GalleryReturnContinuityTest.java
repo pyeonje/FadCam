@@ -137,4 +137,61 @@ public class GalleryReturnContinuityTest {
         verify(repository,never()).getVideos(any());verify(repository,times(1)).deltaScan(settings);
         verify(adapter,times(1)).updateRecords(anyList());assertFalse(ReflectionHelpers.getField(grid,"isLoading"));
     }
+
+    @Test public void deferredScanReplacesMissingTileEvenWhenItemCountStaysTheSame() {
+        RecordsFragment grid=spy(new RecordsFragment());doReturn(true).when(grid).isAdded();
+        VideoItem removed=media(1),replacement=media(2);data(grid,removed);
+        ReflectionHelpers.setField(grid,"totalItems",1);
+        ReflectionHelpers.setField(grid,"progressHandler",new android.os.Handler(Looper.getMainLooper()));
+        SharedPreferencesManager settings=mock(SharedPreferencesManager.class);
+        ReflectionHelpers.setField(grid,"sharedPreferencesManager",settings);
+        RecordsAdapter adapter=mock(RecordsAdapter.class);ReflectionHelpers.setField(grid,"recordsAdapter",adapter);
+        VideoIndexRepository repository=mock(VideoIndexRepository.class);
+        when(repository.deltaScan(settings)).thenReturn(Arrays.asList(replacement));
+        ExecutorService executor=mock(ExecutorService.class);List<Runnable> pending=new ArrayList<>();
+        when(executor.submit(any(Runnable.class))).thenAnswer(inv->{pending.add(inv.getArgument(0));return mock(Future.class);});
+        ReflectionHelpers.setField(grid,"deltaExecutor",executor);
+        ReflectionHelpers.callInstanceMethod(grid,"scheduleRecordsPostFirstPaintWork",
+                ReflectionHelpers.ClassParameter.from(VideoIndexRepository.class,repository));
+        Runnable deferred=ReflectionHelpers.getField(grid,"deferredRecordsDeltaScanRunnable");
+        deferred.run();
+        pending.get(0).run();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(Arrays.asList(replacement),loaded(grid));
+        deferred.run(); // A subsequent identical snapshot must not rebind the grid.
+        pending.get(1).run();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        verify(repository,times(2)).deltaScan(settings);
+        verify(adapter).updateRecords(anyList());
+    }
+
+    @Test public void olderDeferredResultCannotReplaceGridAfterWarmRefreshStarts() {
+        RecordsFragment grid=spy(new RecordsFragment());doReturn(true).when(grid).isAdded();
+        VideoItem original=media(1),stale=media(2),fresh=media(3);data(grid,original);
+        ReflectionHelpers.setField(grid,"totalItems",1);
+        ReflectionHelpers.setField(grid,"progressHandler",new android.os.Handler(Looper.getMainLooper()));
+        SharedPreferencesManager settings=mock(SharedPreferencesManager.class);
+        ReflectionHelpers.setField(grid,"sharedPreferencesManager",settings);
+        RecordsAdapter adapter=mock(RecordsAdapter.class);ReflectionHelpers.setField(grid,"recordsAdapter",adapter);
+        VideoIndexRepository repository=mock(VideoIndexRepository.class);
+        when(repository.deltaScan(settings)).thenReturn(Arrays.asList(stale,fresh),Arrays.asList(fresh));
+        ExecutorService executor=mock(ExecutorService.class);List<Runnable> pending=new ArrayList<>();
+        when(executor.submit(any(Runnable.class))).thenAnswer(inv->{pending.add(inv.getArgument(0));return mock(Future.class);});
+        ReflectionHelpers.setField(grid,"deltaExecutor",executor);
+        ReflectionHelpers.callInstanceMethod(grid,"scheduleRecordsPostFirstPaintWork",
+                ReflectionHelpers.ClassParameter.from(VideoIndexRepository.class,repository));
+        Runnable deferred=ReflectionHelpers.getField(grid,"deferredRecordsDeltaScanRunnable");
+        deferred.run();
+        pending.get(0).run(); // Old result waiting in main queue; warm request supersedes it.
+        ReflectionHelpers.callInstanceMethod(grid,"refreshLoadedRecords",
+                ReflectionHelpers.ClassParameter.from(VideoIndexRepository.class,repository));
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(Arrays.asList(original),loaded(grid));
+        assertEquals(Integer.valueOf(1),ReflectionHelpers.<Integer>getField(grid,"totalItems"));
+        verifyNoInteractions(adapter);
+        pending.get(1).run();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(Arrays.asList(fresh),loaded(grid));
+        verify(adapter).updateRecords(anyList());
+    }
 }

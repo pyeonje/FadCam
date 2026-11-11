@@ -395,6 +395,8 @@ public class RecordsFragment extends BaseFragment implements
     private Runnable showProgressRunnable; // Runnable to show progress after delay
     private Runnable deferredRecordsWarmupRunnable;
     private Runnable deferredRecordsDeltaScanRunnable;
+    // Main-looper ownership for deferred scan results; foreground refresh takes precedence.
+    private long deferredRecordsScanGeneration;
     private static final long RECORDS_INITIAL_METADATA_DELAY_MS = 350L;
     private static final long RECORDS_INITIAL_DELTA_SCAN_DELAY_MS = 1200L;
     private TextView titleText;
@@ -1243,6 +1245,7 @@ public class RecordsFragment extends BaseFragment implements
     // *** Unregister in onStop ***
     @Override
     public void onStop() {
+        ++deferredRecordsScanGeneration;
         super.onStop();
         if (progressHandler != null) {
             if (deferredRecordsWarmupRunnable != null) {
@@ -1858,6 +1861,7 @@ public class RecordsFragment extends BaseFragment implements
                 // Production pattern: keep existing data visible, refresh silently
                 // in background, swap data when ready. No skeleton, no UI thrashing.
 
+                ++deferredRecordsScanGeneration;
                 // Cancel any in-progress delta scan from a previous refresh
                 if (deltaExecutor != null && !deltaExecutor.isShutdown()) {
                     deltaExecutor.shutdownNow();
@@ -5340,6 +5344,7 @@ public class RecordsFragment extends BaseFragment implements
 
     @Override
     public void onDestroyView() {
+        ++deferredRecordsScanGeneration;
         if (gridPinch != null) { gridPinch.close(); gridPinch = null; }
         clearPendingGridAnchor();
         if (recyclerView != null) recyclerView.removeCallbacks(adaptiveGridUpdate);
@@ -5738,6 +5743,7 @@ public class RecordsFragment extends BaseFragment implements
     }
 
     private void prepareRecordsFirstPaint() {
+        ++deferredRecordsScanGeneration;
         if (recordsAdapter != null) {
             recordsAdapter.setDeferHeavyMetadataWork(true);
         }
@@ -5773,34 +5779,26 @@ public class RecordsFragment extends BaseFragment implements
             progressHandler.removeCallbacks(deferredRecordsDeltaScanRunnable);
         }
         deferredRecordsDeltaScanRunnable = () -> {
-            if (!isAdded()) {
-                return;
-            }
+            if (!isAdded() || isLoading) return;
             if (deltaExecutor == null || deltaExecutor.isShutdown()) {
                 deltaExecutor = Executors.newSingleThreadExecutor();
             }
-            final ExecutorService currentDeltaExec = deltaExecutor;
-            final int expectedCount = totalItems;
-            currentDeltaExec.submit(() -> {
+            final long generation = ++deferredRecordsScanGeneration;
+            final SortOption scanSort = currentSortOption;
+            deltaExecutor.submit(() -> {
                 try {
-                    List<VideoItem> deltaItems = repository.deltaScan(sharedPreferencesManager);
-                    if (deltaItems.size() != expectedCount) {
-                        List<VideoItem> deltaNormalized = normalizeVideoCategories(deltaItems);
-                        sortItems(deltaNormalized, currentSortOption);
-                        totalItems = deltaNormalized.size();
-                        FLog.i(TAG, "Delta scan detected changes: " + deltaNormalized.size() + " items");
-                        com.fadcam.utils.VideoSessionCache.updateSessionCache(deltaNormalized);
-                        new Handler(Looper.getMainLooper()).post(() -> {
-                            if (!isAdded()) {
-                                return;
-                            }
-                            allLoadedItems.clear();
-                            allLoadedItems.addAll(deltaNormalized);
-                            applyActiveFilterToUi();
-                        });
-                    } else {
-                        FLog.d(TAG, "Delta scan: no changes detected");
-                    }
+                    List<VideoItem> delta = normalizeVideoCategories(repository.deltaScan(sharedPreferencesManager));
+                    sortItems(delta, scanSort);
+                    new Handler(Looper.getMainLooper()).post(() -> {
+                        if (!isAdded() || generation != deferredRecordsScanGeneration) return;
+                        if (scanSort != currentSortOption) sortItems(delta, currentSortOption);
+                        if (sameGallerySnapshot(allLoadedItems, delta)) return;
+                        totalItems = delta.size();
+                        allLoadedItems.clear();
+                        allLoadedItems.addAll(delta);
+                        com.fadcam.utils.VideoSessionCache.updateSessionCache(delta);
+                        applyActiveFilterToUi();
+                    });
                 } catch (Exception e) {
                     FLog.w(TAG, "Delta scan failed (non-fatal): " + e.getMessage());
                 }
@@ -5811,12 +5809,26 @@ public class RecordsFragment extends BaseFragment implements
         progressHandler.postDelayed(deferredRecordsDeltaScanRunnable, RECORDS_INITIAL_DELTA_SCAN_DELAY_MS);
     }
 
+    private static boolean sameGallerySnapshot(List<VideoItem> before, List<VideoItem> after) {
+        if (before.size() != after.size()) return false;
+        for (int i = 0; i < before.size(); i++) {
+            VideoItem a = before.get(i), b = after.get(i);
+            if (!Objects.equals(a.uri, b.uri) || !Objects.equals(a.displayName, b.displayName)
+                    || a.size != b.size || a.lastModified != b.lastModified
+                    || a.category != b.category || a.mediaType != b.mediaType
+                    || a.shotSubtype != b.shotSubtype || a.cameraSubtype != b.cameraSubtype
+                    || a.faditorSubtype != b.faditorSubtype) return false;
+        }
+        return true;
+    }
+
     private void loadRecordsList() {
         loadRecordsList(false);
     }
 
     /** Refresh a warm grid once from the final filesystem view, never stale DB then delta. */
     private void refreshLoadedRecords(@NonNull com.fadcam.data.VideoIndexRepository repository) {
+        ++deferredRecordsScanGeneration;
         if (deltaExecutor == null || deltaExecutor.isShutdown()) {
             deltaExecutor = Executors.newSingleThreadExecutor();
         }

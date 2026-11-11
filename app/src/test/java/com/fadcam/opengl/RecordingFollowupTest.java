@@ -96,7 +96,9 @@ public class RecordingFollowupTest {
             ReflectionHelpers.setField(pipeline, "audioRecord", null);
             ReflectionHelpers.setField(pipeline, "audioRecordingEnabled", false);
             prefs.setRecordAudioEnabled(saved);
-            pipeline.stopRecording();
+            // These clock-only fixtures intentionally never supply a video format or sample.
+            IllegalStateException failure = assertThrows(IllegalStateException.class, pipeline::stopRecording);
+            assertTrue(failure.getMessage().contains("영상 형식"));
         }
     }
 
@@ -133,7 +135,9 @@ public class RecordingFollowupTest {
             assertEquals(-1L, pipeline().getSynchronizedVideoTimestamp(0));
         } finally {
             prefs.setRecordAudioEnabled(saved);
-            pipeline.stopRecording();
+            // These clock-only fixtures intentionally never supply a video format or sample.
+            IllegalStateException failure = assertThrows(IllegalStateException.class, pipeline::stopRecording);
+            assertTrue(failure.getMessage().contains("영상 형식"));
         }
     }
 

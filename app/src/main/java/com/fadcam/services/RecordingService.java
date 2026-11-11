@@ -2429,6 +2429,7 @@ public class RecordingService extends Service {
             FLog.d(TAG, "Cancelled maximum recording duration for current session");
         }
         final com.fadcam.opengl.GLRecordingPipeline requestedPipeline;
+        final boolean recordingActuallyStarted;
         synchronized (this) {
             if (isStopping) {
                 FLog.w(TAG, "stopRecording: Already in stopping process, ignoring duplicate call");
@@ -2437,6 +2438,8 @@ public class RecordingService extends Service {
             finalizingTimelineMs = getEffectiveTimelineMs();
             isStopping = true;
             requestedPipeline = glRecordingPipeline;
+            // STARTING may have no camera or only a prepared, preview-capable pipeline.
+            recordingActuallyStarted = recordingStartTime > 0L;
             if (requestedPipeline != null) requestedPipeline.requestOutputStop();
         }
         final String inFlightUri = getCurrentRecordingMediaUri();
@@ -2521,7 +2524,7 @@ public class RecordingService extends Service {
         // Use a background thread for resource cleanup to avoid blocking the main
         // thread
         new Thread(() -> {
-            boolean outputSaved = true;
+            boolean outputSaved = recordingActuallyStarted && endingPipeline != null;
             try {
                 // Set camera resources as releasing and broadcast early
                 setCameraResourcesReleasing(true);

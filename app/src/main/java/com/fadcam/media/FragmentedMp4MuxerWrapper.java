@@ -52,6 +52,9 @@ public class FragmentedMp4MuxerWrapper {
     // Track indices
     private int videoTrackIndex = -1;
     private int audioTrackIndex = -1;
+    // Writer callback records validated payloads; read after closeWriter joins the writer.
+    private boolean processedVideoSamples;
+    private boolean processedAudioSamples;
     
     // Expected track count for choosing a common fragment origin
     private int trackCount = 0;
@@ -368,6 +371,14 @@ public class FragmentedMp4MuxerWrapper {
                 closeWriter();
                 if (outputFailure != null) throw outputFailure;
                 performHybridFinalization();
+                // The final moov omits empty tracks. Keep the recoverable file, but a
+                // segment missing a registered track must never be reported as saved.
+                if ((videoTrackIndex >= 0 && !processedVideoSamples)
+                        || (audioTrackIndex >= 0 && !processedAudioSamples)) {
+                    lastFinalizeOutcome = "INCOMPLETE (available samples preserved)";
+                    throw new IOException(videoTrackIndex >= 0 && !processedVideoSamples
+                            ? "영상 샘플을 저장하지 못했습니다." : "오디오 샘플을 저장하지 못했습니다.");
+                }
             } catch (IOException | MuxerException e) {
                 throw new IllegalStateException("녹화 파일을 완전히 저장하지 못했습니다.", e);
             } finally {
@@ -1269,6 +1280,8 @@ public class FragmentedMp4MuxerWrapper {
                     writeSegmentWithRecovery(data, layout);
                 }
                 
+                processedVideoSamples |= layout.videoCount > 0;
+                processedAudioSamples |= layout.audioCount > 0;
                 nextFragmentNumber++;
                 // Track cumulative duration for mvhd patch
                 cumulativeDurationUs = Math.max(cumulativeDurationUs, layout.endUs);

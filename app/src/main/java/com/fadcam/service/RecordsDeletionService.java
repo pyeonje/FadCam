@@ -545,18 +545,21 @@ public class RecordsDeletionService extends Service {
     }
 
     private boolean copyToLegacyGallery(@NonNull RecordsDeletionRequestItem item,@NonNull Uri source) throws Exception {
+        long sourceSize=GalleryMediaPublisher.sourceSize(getContentResolver(),source);
+        if(sourceSize<=0)return false;
         File destination=resolveUniqueGalleryDestination(GalleryMediaPublisher.displayName(item.displayName));
         if(destination==null||!destination.createNewFile())return false;
         boolean completed=false;
         try {
+            java.security.MessageDigest digest=com.fadcam.utils.CopyIntegrity.sha256();
             long copied;
-            try(InputStream in=getContentResolver().openInputStream(source);
+            try(InputStream in=GalleryMediaPublisher.digesting(getContentResolver().openInputStream(source),digest);
                     OutputStream out=new FileOutputStream(destination)) {
-                if(in==null)throw new java.io.IOException("Source stream unavailable");
                 copied=GalleryMediaPublisher.copy(in,out,cancelRequested::get);
             }
-            if(copied<=0||(item.sizeBytes>0&&copied!=item.sizeBytes)||destination.length()!=copied)
-                throw new java.io.IOException("Gallery byte count mismatch");
+            if(copied!=sourceSize||(item.sizeBytes>0&&copied!=item.sizeBytes)||destination.length()!=copied
+                    ||!com.fadcam.utils.CopyIntegrity.matches(new java.io.FileInputStream(destination),copied,digest.digest()))
+                throw new java.io.IOException("Gallery bytes do not match source");
             GalleryMediaPublisher.checkCancelled(cancelRequested::get);
             Utils.scanFileWithMediaStore(this,destination.getAbsolutePath());
             completed=true;return true;
@@ -718,7 +721,9 @@ public class RecordsDeletionService extends Service {
     }
 
     @Nullable
-    private androidx.documentfile.provider.DocumentFile createUniqueSafFile(@NonNull androidx.documentfile.provider.DocumentFile targetDir, @NonNull String originalName) {
+    private androidx.documentfile.provider.DocumentFile createUniqueSafFile(
+            @NonNull androidx.documentfile.provider.DocumentFile targetDir, @NonNull String originalName)
+            throws java.io.IOException {
         String base = originalName;
         String ext = "";
         int dot = originalName.lastIndexOf('.');
@@ -728,7 +733,8 @@ public class RecordsDeletionService extends Service {
         }
 
         // Try original name first
-        androidx.documentfile.provider.DocumentFile file = targetDir.createFile("*/*", originalName);
+        androidx.documentfile.provider.DocumentFile file = com.fadcam.utils.SafFreshDocument.create(
+                getContentResolver(), targetDir, "*/*", originalName);
         if (file != null) {
             return file;
         }
@@ -736,7 +742,7 @@ public class RecordsDeletionService extends Service {
         // If exists, try with number suffix
         for (int i = 1; i <= 100; i++) {
             String uniqueName = base + "_" + i + ext;
-            file = targetDir.createFile("*/*", uniqueName);
+            file = com.fadcam.utils.SafFreshDocument.create(getContentResolver(), targetDir, "*/*", uniqueName);
             if (file != null) {
                 return file;
             }

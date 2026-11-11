@@ -837,7 +837,7 @@ public class TrashManager {
             String mimeType = getMimeTypeForFile(targetFileName);
 
             try {
-                DocumentFile newDoc = safDir.createFile(mimeType, targetFileName);
+                DocumentFile newDoc = SafFreshDocument.create(context.getContentResolver(), safDir, mimeType, targetFileName);
                 if (newDoc != null && restoreToSafDocument(context, fileInTrash, item, newDoc)) {
                     updatedMetadata.remove(item);
                 } else allSucceeded = false;

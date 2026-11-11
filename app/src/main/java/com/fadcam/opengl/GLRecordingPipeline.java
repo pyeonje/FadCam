@@ -2449,6 +2449,12 @@ public class GLRecordingPipeline {
         // and we get "Handler sending message to a dead thread" errors
         // This is the production-grade EOS-based drain that waits for actual EOS flags
         emergencyDrainEncoders();
+        // EOS is a lifecycle signal, not evidence of a saved file. If the first
+        // video format never arrived, the unstarted muxer would otherwise no-op.
+        // An earlier completed segment remains valid when STOP wins a rollover.
+        if (videoSamplesWritten == 0 && videoTrackIndex == -1) {
+            recordFailure("영상 형식을 받지 못해 녹화를 저장하지 못했습니다.", null);
+        }
         if (audioRecordingEnabled && audioTrackIndex == -1 && !recoveringWithoutAudio) {
             recoverVideoWithoutAudio("녹화를 종료할 때까지 오디오 트랙을 만들지 못했습니다.");
         } else if (audioRecordingEnabled && audioTrackIndex != -1 && audioSamplesWritten == 0) {

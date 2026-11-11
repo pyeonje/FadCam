@@ -49,7 +49,9 @@ public class GalleryMediaPublisherTest {
         when(resolver.getType(any())).thenReturn("video/mp4");
         when(resolver.insert(any(),any())).thenReturn(destination);
         when(resolver.openInputStream(Uri.fromFile(source))).thenAnswer(inv->new FileInputStream(source));
-        when(resolver.openOutputStream(destination,"w")).thenReturn(new ByteArrayOutputStream());
+        ByteArrayOutputStream written=new ByteArrayOutputStream();
+        when(resolver.openOutputStream(destination,"w")).thenReturn(written);
+        when(resolver.openInputStream(destination)).thenAnswer(inv->new java.io.ByteArrayInputStream(written.toByteArray()));
         ParcelFileDescriptor fd=mock(ParcelFileDescriptor.class);when(fd.getStatSize()).thenReturn((long)BYTES.length);
         when(resolver.openFileDescriptor(destination,"r")).thenReturn(fd);
         when(resolver.update(eq(destination),any(),isNull(),isNull())).thenReturn(1);
@@ -69,16 +71,23 @@ public class GalleryMediaPublisherTest {
 
     @Test public void successfulMoveClosesAndPublishesBeforeDeletingOriginal() throws Exception {
         File source=source();ContentResolver resolver=resolver(source);List<String> order=new ArrayList<>();
-        when(resolver.openOutputStream(destination,"w")).thenReturn(new ByteArrayOutputStream(){
+        ByteArrayOutputStream written=new ByteArrayOutputStream(){
             @Override public void close() throws IOException { super.close();order.add("closed"); }
+        };
+        when(resolver.openOutputStream(destination,"w")).thenReturn(written);
+        when(resolver.openInputStream(destination)).thenAnswer(inv->{
+            assertTrue(source.exists());
+            assertEquals(java.util.Arrays.asList("closed"),order);
+            order.add("readback");
+            return new java.io.ByteArrayInputStream(written.toByteArray());
         });
         when(resolver.update(eq(destination),any(),isNull(),isNull())).thenAnswer(inv->{
-            assertTrue(source.exists());assertEquals(java.util.Arrays.asList("closed"),order);
+            assertTrue(source.exists());assertEquals(java.util.Arrays.asList("closed","readback"),order);
             ContentValues ready=inv.getArgument(1);assertEquals(Integer.valueOf(0),ready.getAsInteger(MediaStore.MediaColumns.IS_PENDING));
             order.add("published");return 1;
         });
         assertTrue(save(service(resolver,new AtomicBoolean()),item(source),true));
-        assertFalse(source.exists());assertEquals(java.util.Arrays.asList("closed","published"),order);
+        assertFalse(source.exists());assertEquals(java.util.Arrays.asList("closed","readback","published"),order);
         verify(resolver,never()).delete(any(),any(),any());
     }
 
@@ -153,6 +162,49 @@ public class GalleryMediaPublisherTest {
         assertFalse(save(service(resolver,new AtomicBoolean()),changed,true));
         assertArrayEquals(BYTES,Files.readAllBytes(source.toPath()));
         verify(resolver,never()).update(any(),any(),any(),any());verify(resolver).delete(destination,null,null);
+    }
+
+
+    @Test public void earlyEofWithUnknownIndexedSizeCannotMoveLocalOriginal() throws Exception {
+        File source=source();ContentResolver resolver=resolver(source);
+        when(resolver.openInputStream(Uri.fromFile(source))).thenReturn(new java.io.ByteArrayInputStream(new byte[]{11,22}));
+        ParcelFileDescriptor fd=mock(ParcelFileDescriptor.class);when(fd.getStatSize()).thenReturn(2L);
+        when(resolver.openFileDescriptor(destination,"r")).thenReturn(fd);
+        RecordsDeletionRequestItem unknown=new RecordsDeletionRequestItem(Uri.fromFile(source).toString(),
+                source.getName(),-1,false);
+        assertFalse(save(service(resolver,new AtomicBoolean()),unknown,true));
+        assertArrayEquals(BYTES,Files.readAllBytes(source.toPath()));
+        verify(resolver,never()).update(any(),any(),any(),any());
+    }
+
+    @Test public void sameLengthGalleryReadbackCorruptionCannotPublishOrDeleteOriginal() throws Exception {
+        File source=source();ContentResolver resolver=resolver(source);
+        when(resolver.openInputStream(destination)).thenReturn(new java.io.ByteArrayInputStream(
+                new byte[]{11,22,99,44,55}));
+        assertFalse(save(service(resolver,new AtomicBoolean()),item(source),true));
+        assertArrayEquals(BYTES,Files.readAllBytes(source.toPath()));
+        verify(resolver,never()).update(any(),any(),any(),any());verify(resolver).delete(destination,null,null);
+    }
+
+    @Test public void unopenableGalleryReadbackCannotPublishOrDeleteOriginal() throws Exception {
+        File source=source();ContentResolver resolver=resolver(source);
+        when(resolver.openInputStream(destination)).thenThrow(new FileNotFoundException("fixture readback denied"));
+        assertFalse(save(service(resolver,new AtomicBoolean()),item(source),true));
+        assertArrayEquals(BYTES,Files.readAllBytes(source.toPath()));
+        verify(resolver,never()).update(any(),any(),any(),any());verify(resolver).delete(destination,null,null);
+    }
+
+    @Test public void zeroProgressCannotBeAcceptedAsACompleteGalleryCopy() {
+        java.io.InputStream input=new java.io.InputStream(){
+            private int call;
+            @Override public int read(){return -1;}
+            @Override public int read(byte[] b,int offset,int length){
+                if(call++==0)return 0;
+                if(call==2){b[offset]=11;return 1;}
+                return -1;
+            }
+        };
+        assertThrows(IOException.class,()->GalleryMediaPublisher.copy(input,new ByteArrayOutputStream(),()->false));
     }
 
     @Test @Config(sdk=28) public void legacyFailedSourceCloseCleansOnlyNewPartialAndPreservesExistingNameCollision() throws Exception {
