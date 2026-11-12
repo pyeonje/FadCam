@@ -745,35 +745,37 @@ public class TrashFragment extends BaseFragment implements TrashAdapter.OnTrashI
 
     @Override
     public void onPlayVideoRequested(TrashItem item) {
-        if (getContext() == null || item == null || item.getTrashFileName() == null) {
-            Toast.makeText(getContext(), getString(R.string.trash_cannot_open), Toast.LENGTH_SHORT).show();
+        Context context = getContext();
+        if (context == null) return;
+        if (item == null || item.getTrashFileName() == null) {
+            Toast.makeText(context, getString(R.string.trash_cannot_open), Toast.LENGTH_SHORT).show();
             return;
         }
 
-        File trashDirectory = TrashManager.getTrashDirectory(getContext());
+        File trashDirectory = TrashManager.getTrashDirectory(context);
         if (trashDirectory == null) {
-            Toast.makeText(getContext(), getString(R.string.trash_cannot_access_dir), Toast.LENGTH_SHORT).show();
+            Toast.makeText(context, getString(R.string.trash_cannot_access_dir), Toast.LENGTH_SHORT).show();
             return;
         }
 
         File trashedFile = TrashManager.resolveTrashFile(trashDirectory, item.getTrashFileName());
 
         if (trashedFile == null || !trashedFile.isFile()) {
-            FLog.e(TAG, "Trashed file does not exist: " + trashedFile.getAbsolutePath());
-            Toast.makeText(getContext(), getString(R.string.trash_file_not_found), Toast.LENGTH_SHORT).show();
+            FLog.e(TAG, "Trash playback file is unavailable.");
+            Toast.makeText(context, getString(R.string.trash_file_not_found), Toast.LENGTH_SHORT).show();
             return;
         }
 
         try {
             boolean isImage = isImageFile(item.getTrashFileName());
             Intent intent = isImage
-                    ? new Intent(getContext(), ImageViewerActivity.class)
-                    : new Intent(getContext(), VideoPlayerActivity.class);
+                    ? new Intent(context, ImageViewerActivity.class)
+                    : new Intent(context, VideoPlayerActivity.class);
             intent.setData(Uri.fromFile(trashedFile));
             startActivity(intent);
         } catch (Exception e) {
             FLog.e(TAG, "Error opening trash item: " + trashedFile.getAbsolutePath(), e);
-            Toast.makeText(getContext(), getString(R.string.trash_error_opening), Toast.LENGTH_SHORT).show();
+            Toast.makeText(context, getString(R.string.trash_error_opening), Toast.LENGTH_SHORT).show();
         }
     }
 

@@ -324,7 +324,7 @@ public class TrashAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> 
                             .centerCrop()
                             .into(imageViewThumbnail);
                     } else {
-                        FLog.w("TrashAdapter", "Trashed video file does not exist: " + trashedVideoFile.getAbsolutePath());
+                        FLog.w("TrashAdapter", "Trash thumbnail file is unavailable.");
                         Glide.with(context).load(R.drawable.ic_error).into(imageViewThumbnail); // Show error icon
                     }
                 } else {
@@ -374,10 +374,10 @@ public class TrashAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> 
                             if (trashedFile != null && trashedFile.isFile()) {
                                 interactionListener.onPlayVideoRequested(item);
                             } else {
-                                Toast.makeText(context, "File not found in trash.", Toast.LENGTH_SHORT).show();
+                                Toast.makeText(context, R.string.trash_file_not_found, Toast.LENGTH_SHORT).show();
                             }
                         } else {
-                            Toast.makeText(context, "Cannot locate file.", Toast.LENGTH_SHORT).show();
+                            Toast.makeText(context, R.string.trash_cannot_open, Toast.LENGTH_SHORT).show();
                         }
                     }
                 } else {

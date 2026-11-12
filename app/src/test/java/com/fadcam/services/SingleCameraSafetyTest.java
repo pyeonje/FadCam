@@ -98,6 +98,8 @@ public class SingleCameraSafetyTest {
             publication.run();
             verify(pipeline, never()).stopRecording();
             assertFalse(result().getBooleanExtra(Constants.EXTRA_RECORDING_SUCCESS, true));
+            service.onStartCommand(new Intent(Constants.INTENT_ACTION_STOP_RECORDING), 0, 6);
+            assertSame(service, shutdownOwner().get());
             service.onStartCommand(new Intent(Constants.INTENT_ACTION_START_RECORDING), 0, 7);
             assertTrue(ReflectionHelpers.<Boolean>getField(service, "isStopping"));
             verify(camera, times(1)).close();
@@ -227,4 +229,92 @@ public class SingleCameraSafetyTest {
         return Shadows.shadowOf(app).getBroadcastIntents().stream()
                 .filter(i -> Constants.ACTION_RECORDING_COMPLETE.equals(i.getAction())).findFirst().orElse(null);
     }
+    @Test public void idleStopIntentNeverClaimsCameraShutdown() {
+        setup();
+        var owner = shutdownOwner();
+        RecordingService previousOwner = owner.get();
+        try {
+            ReflectionHelpers.setField(service, "glRecordingPipeline", null);
+            service.onStartCommand(new Intent(Constants.INTENT_ACTION_STOP_RECORDING), 0, 1);
+            assertFalse(ReflectionHelpers.<Boolean>getField(service, "cameraGlShutdownPending"));
+            assertFalse(ReflectionHelpers.<Boolean>getField(service, "isStopping"));
+            assertSame(previousOwner, owner.get());
+        } finally {
+            owner.compareAndSet(service, previousOwner);
+        }
+    }
+
+    @Test public void duplicateIdleStopIntentsDoNotRetireLivePreviewOrAdvanceCameraGeneration() {
+        setup();
+        var owner = shutdownOwner();
+        RecordingService previousOwner = owner.get();
+        CameraDevice previewCamera = mock(CameraDevice.class);
+        ReflectionHelpers.setField(service, "cameraDevice", previewCamera);
+        ReflectionHelpers.setField(service, "previewOnlyActive", true);
+        java.util.concurrent.atomic.AtomicLong generation = ReflectionHelpers.getField(service, "cameraOpenGeneration");
+        long before = generation.get();
+        try {
+            service.onStartCommand(new Intent(Constants.INTENT_ACTION_STOP_RECORDING), 0, 1);
+            service.onStartCommand(new Intent(Constants.INTENT_ACTION_STOP_RECORDING), 0, 2);
+            verify(pipeline, never()).requestOutputStop();
+            verify(pipeline, never()).stopRecording();
+            verify(previewCamera, never()).close();
+            assertEquals(before, generation.get());
+            assertFalse(ReflectionHelpers.<Boolean>getField(service, "cameraGlShutdownPending"));
+            assertSame(previousOwner, owner.get());
+        } finally {
+            owner.compareAndSet(service, previousOwner);
+        }
+    }
+
+    @Test public void idleStopOnAnotherInstanceDoesNotStealOrStrandPendingCameraShutdown() throws Exception {
+        setup();
+        var owner = shutdownOwner();
+        RecordingService previousOwner = owner.get();
+        CameraDevice camera = mock(CameraDevice.class);
+        ReflectionHelpers.setField(service, "cameraDevice", camera);
+        ReflectionHelpers.setField(service, "previewOnlyActive", true);
+        RecordingService replacement = Robolectric.buildService(RecordingService.class).get();
+        ReflectionHelpers.setField(replacement, "sharedPreferencesManager", prefs);
+        try {
+            ReflectionHelpers.callInstanceMethod(service, "stopPreviewOnlyMode");
+            assertSame(service, owner.get());
+            replacement.onStartCommand(new Intent(Constants.INTENT_ACTION_STOP_RECORDING), 0, 1);
+            assertSame(service, owner.get());
+            assertFalse(ReflectionHelpers.<Boolean>getField(replacement, "cameraGlShutdownPending"));
+            verify(pipeline, never()).stopRecording();
+            var watermark = mock(com.fadcam.watermark.WatermarkManager.class);
+            RuntimeException reachedRecordingSetup = new RuntimeException("recording setup gate reached");
+            doThrow(reachedRecordingSetup).when(watermark).initialize(any());
+            ReflectionHelpers.setField(replacement, "watermarkManager", watermark);
+            replacement.onStartCommand(new Intent(Constants.INTENT_ACTION_START_RECORDING), 0, 2);
+            verifyNoInteractions(watermark);
+            callback().onClosed(camera);
+            Runnable cleanup = mainWork.poll(2, TimeUnit.SECONDS);
+            assertNotNull(cleanup);
+            cleanup.run();
+            assertNull(owner.get());
+            verify(pipeline).stopRecording();
+            verify(camera).close();
+            assertFalse(ReflectionHelpers.<Boolean>callInstanceMethod(replacement, "anotherCameraShutdownIsPending"));
+            // Stop at the first setup operation: this proves the actual START_RECORDING
+            // intent passed the teardown guard without opening a device.
+            assertSame(reachedRecordingSetup, assertThrows(RuntimeException.class,
+                    () -> replacement.onStartCommand(new Intent(Constants.INTENT_ACTION_START_RECORDING), 0, 3)));
+            replacement.onStartCommand(new Intent(Constants.INTENT_ACTION_START_PREVIEW_ONLY), 0, 4);
+            assertTrue("the replacement accepts a preview request once the real close completes",
+                    ReflectionHelpers.<Boolean>getField(replacement, "pendingPreviewOnlyStart"));
+        } finally {
+            callback().onClosed(camera);
+            Runnable cleanup = mainWork.poll(1, TimeUnit.SECONDS);
+            if (cleanup != null) cleanup.run();
+            owner.compareAndSet(service, previousOwner);
+            owner.compareAndSet(replacement, previousOwner);
+        }
+    }
+
+    private static java.util.concurrent.atomic.AtomicReference<RecordingService> shutdownOwner() {
+        return ReflectionHelpers.getStaticField(RecordingService.class, "cameraShutdownOwner");
+    }
+
 }

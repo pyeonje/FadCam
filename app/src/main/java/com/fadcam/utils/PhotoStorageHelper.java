@@ -10,11 +10,13 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.net.Uri;
+import android.os.Build;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.style.ImageSpan;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import androidx.documentfile.provider.DocumentFile;
 
 import com.fadcam.Constants;
@@ -22,8 +24,13 @@ import com.fadcam.R;
 import com.fadcam.SharedPreferencesManager;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
+import java.security.DigestOutputStream;
+import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -31,6 +38,9 @@ import java.util.Locale;
 public final class PhotoStorageHelper {
     private static final String TAG = "PhotoStorageHelper";
     private static final int JPEG_QUALITY = 88;
+    private static final int MAX_NAME_ATTEMPTS = 128;
+    private static final Object INTERNAL_DIRECTORY_LOCK = new Object();
+    private static final Object SAF_CREATION_LOCK = new Object();
 
     public enum ShotSource {
         BACK,
@@ -129,28 +139,59 @@ public final class PhotoStorageHelper {
             @NonNull Bitmap bitmap,
             @NonNull ShotSource shotSource
     ) {
-        File shotDir = RecordingStoragePaths.getInternalShotSourceDir(
-                context,
-                toStorageShotSource(shotSource),
-                true);
-        if (shotDir == null) {
-            FLog.e(TAG, "saveToInternal: shotDir is null for source=" + shotSource);
+        return saveToInternal(context, fileName, bitmap, shotSource, java.util.function.UnaryOperator.identity());
+    }
+
+    // Package-private stream decorator lets the regression suite inject a close failure
+    // after a real candidate has been exclusively created, without global I/O hooks.
+    @Nullable
+    static Uri saveToInternal(Context context, String fileName, Bitmap bitmap, ShotSource shotSource,
+            java.util.function.UnaryOperator<OutputStream> decorateOutput) {
+        final File shotDir;
+        synchronized (INTERNAL_DIRECTORY_LOCK) {
+            shotDir = RecordingStoragePaths.getInternalShotSourceDir(context, toStorageShotSource(shotSource), true);
+        }
+        if (shotDir == null || !shotDir.isDirectory()) {
+            FLog.e(TAG, "Internal photo directory unavailable");
             return null;
         }
-        File outputFile = new File(shotDir, fileName);
-        FLog.d(TAG, "saveToInternal: outputPath=" + outputFile.getAbsolutePath());
-        try (FileOutputStream fos = new FileOutputStream(outputFile)) {
-            boolean ok = bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, fos);
-            if (!ok) {
-                FLog.e(TAG, "saveToInternal: bitmap.compress returned false");
+        for (int attempt = 0; attempt < MAX_NAME_ATTEMPTS; attempt++) {
+            File candidate = new File(shotDir, photoName(fileName, attempt));
+            boolean owned = false;
+            boolean verified = false;
+            try {
+                final OutputStream output;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    output = ExclusiveLocalFile.open(candidate);
+                    if (output == null) continue; // Name taken; never open it for writing.
+                    owned = true;
+                } else {
+                    if (!candidate.createNewFile()) continue;
+                    owned = true;
+                    // Android 7 lacks java.nio.file. Exclusive creation reserves the name;
+                    // append mode also avoids truncation when opening the reserved file.
+                    output = new FileOutputStream(candidate, true);
+                }
+                try (OutputStream target = output) {
+                    writeVerifiedJpeg(bitmap, decorateOutput.apply(target), () -> new FileInputStream(candidate));
+                }
+                verified = true;
+                return Uri.fromFile(candidate);
+            } catch (IOException | RuntimeException failure) {
+                FLog.e(TAG, "Internal photo save failed", failure);
                 return null;
+            } finally {
+                if (owned && !verified) {
+                    try {
+                        if (!candidate.delete()) FLog.w(TAG, "Could not remove incomplete new photo");
+                    } catch (RuntimeException failure) {
+                        FLog.w(TAG, "Could not remove incomplete new photo", failure);
+                    }
+                }
             }
-            fos.flush();
-            return Uri.fromFile(outputFile);
-        } catch (Exception e) {
-            FLog.e(TAG, "saveToInternal: exception", e);
-            return null;
         }
+        FLog.e(TAG, "No available photo name");
+        return null;
     }
 
     @Nullable
@@ -161,38 +202,100 @@ public final class PhotoStorageHelper {
             @NonNull Bitmap bitmap,
             @NonNull ShotSource shotSource
     ) {
-        DocumentFile shotDir = RecordingStoragePaths.getSafShotSourceDir(
-                context,
-                customTreeUri,
-                toStorageShotSource(shotSource),
-                true);
-        if (shotDir == null || !shotDir.canWrite()) {
-            FLog.e(TAG, "saveToSaf: shotDir unavailable or not writable. source=" + shotSource
-                    + ", treeUri=" + customTreeUri);
+        DocumentFile confirmed = null;
+        boolean verified = false;
+        try {
+            final android.content.ContentResolver resolver = context.getContentResolver();
+            synchronized (SAF_CREATION_LOCK) {
+                DocumentFile shotDir = RecordingStoragePaths.getSafShotSourceDir(
+                        context, customTreeUri, toStorageShotSource(shotSource), true);
+                if (shotDir == null || !shotDir.canWrite()) return null;
+                confirmed = SafFreshDocument.create(resolver, shotDir, "image/jpeg", fileName);
+                if (confirmed == null) {
+                    // A name may already be present. The second candidate still needs
+                    // independent ownership proof and retains the FadShot source prefix.
+                    confirmed = SafFreshDocument.create(resolver, shotDir, "image/jpeg",
+                            photoName(fileName, java.util.UUID.randomUUID().toString()));
+                }
+            }
+            if (confirmed == null) return null;
+            Uri uri = confirmed.getUri();
+            writeVerifiedJpeg(bitmap, resolver.openOutputStream(uri, "w"), () -> resolver.openInputStream(uri));
+            verified = true;
+            return uri;
+        } catch (IOException | RuntimeException failure) {
+            FLog.e(TAG, "SAF photo save failed", failure);
             return null;
+        } finally {
+            // SafFreshDocument either proved ownership or threw before assigning confirmed.
+            if (confirmed != null && !verified) {
+                try {
+                    if (!confirmed.delete()) FLog.w(TAG, "Could not remove incomplete new SAF photo");
+                } catch (RuntimeException failure) {
+                    FLog.w(TAG, "Could not remove incomplete new SAF photo", failure);
+                }
+            }
+        }
+    }
+
+    private static String photoName(String fileName, int attempt) {
+        return attempt == 0 ? fileName : photoName(fileName, String.valueOf(attempt));
+    }
+
+    private static String photoName(String fileName, String suffix) {
+        int dot = fileName.lastIndexOf('.');
+        return dot > 0
+                ? fileName.substring(0, dot) + "_" + suffix + fileName.substring(dot)
+                : fileName + "_" + suffix;
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private static final class ExclusiveLocalFile {
+        @Nullable
+        static OutputStream open(File file) throws IOException {
+            try {
+                return java.nio.file.Files.newOutputStream(file.toPath(),
+                        java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE);
+            } catch (java.nio.file.FileAlreadyExistsException taken) {
+                return null;
+            }
+        }
+    }
+
+    private interface ReadBack {
+        InputStream open() throws IOException;
+    }
+
+    private static void writeVerifiedJpeg(Bitmap bitmap, OutputStream target, ReadBack readBack) throws IOException {
+        if (target == null) throw new IOException("JPEG output could not be opened");
+        MessageDigest digest = CopyIntegrity.sha256();
+        CountingDigestOutput output = new CountingDigestOutput(target, digest);
+        try (CountingDigestOutput ignored = output) {
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, output)) {
+                throw new IOException("JPEG encoding failed");
+            }
+            output.flush();
+        }
+        if (output.bytes <= 0 || !CopyIntegrity.matches(readBack.open(), output.bytes, digest.digest())) {
+            throw new IOException("Stored JPEG differs from the encoded image");
+        }
+    }
+
+    private static final class CountingDigestOutput extends DigestOutputStream {
+        long bytes;
+
+        CountingDigestOutput(OutputStream output, MessageDigest digest) {
+            super(output, digest);
         }
 
-        DocumentFile doc = shotDir.createFile("image/jpeg", fileName);
-        if (doc == null) {
-            FLog.e(TAG, "saveToSaf: createFile returned null for fileName=" + fileName);
-            return null;
+        @Override public void write(int value) throws IOException {
+            super.write(value);
+            bytes++;
         }
-        try (OutputStream os = context.getContentResolver().openOutputStream(doc.getUri(), "w")) {
-            if (os == null) {
-                FLog.e(TAG, "saveToSaf: openOutputStream returned null uri=" + doc.getUri());
-                return null;
-            }
-            boolean ok = bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, os);
-            if (!ok) {
-                FLog.e(TAG, "saveToSaf: bitmap.compress returned false");
-                return null;
-            }
-            os.flush();
-            FLog.d(TAG, "saveToSaf: saved uri=" + doc.getUri());
-            return doc.getUri();
-        } catch (Exception e) {
-            FLog.e(TAG, "saveToSaf: exception", e);
-            return null;
+
+        @Override public void write(byte[] data, int offset, int count) throws IOException {
+            super.write(data, offset, count);
+            bytes += count;
         }
     }
 

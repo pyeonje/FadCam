@@ -5,6 +5,7 @@ import com.fadcam.FLog;
 import android.graphics.Outline;
 import android.view.ViewOutlineProvider;
 import android.app.AlertDialog;
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.os.Build;
 import android.os.Bundle;
@@ -33,7 +34,7 @@ import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.Iterator;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -56,7 +57,10 @@ public class WatchTrashFragment extends Fragment {
     private final List<TrashItem> items = new ArrayList<>();
     private WatchTrashAdapter adapter;
 
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private ExecutorService executor = Executors.newSingleThreadExecutor();
+    private long viewGeneration;
+    private long loadGeneration;
+    private boolean actionInFlight;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     // -------------------------------------------------------------------------
@@ -74,6 +78,8 @@ public class WatchTrashFragment extends Fragment {
     @Override
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
+        ++viewGeneration;
+        if (executor.isShutdown()) executor = Executors.newSingleThreadExecutor();
 
         recyclerView  = view.findViewById(R.id.rv_watch_trash);
         tvEmpty       = view.findViewById(R.id.tv_watch_trash_empty);
@@ -105,31 +111,73 @@ public class WatchTrashFragment extends Fragment {
 
     @Override
     public void onDestroyView() {
+        ++viewGeneration;
+        // Confirmed actions finish against the application context, never the old view.
+        executor.shutdown();
+        recyclerView = null;
+        tvEmpty = null;
+        btnDeleteAll = null;
+        adapter = null;
         super.onDestroyView();
-        executor.shutdownNow();
     }
 
-    // -------------------------------------------------------------------------
-    // Data loading
-    // -------------------------------------------------------------------------
+    private boolean ownsView(long generation) {
+        return viewGeneration == generation && isAdded() && recyclerView != null && adapter != null;
+    }
 
     private void loadItems() {
-        FLog.d(TAG, "Loading trash items...");
+        if (!ownsView(viewGeneration) || actionInFlight || executor.isShutdown()) return;
+        final Context context = requireContext().getApplicationContext();
+        final long view = viewGeneration;
+        final long request = ++loadGeneration;
         executor.execute(() -> {
-            final List<TrashItem> loaded = TrashManager.loadTrashMetadata(requireContext());
-            FLog.d(TAG, "Loaded " + (loaded != null ? loaded.size() : 0) + " trash items");
-            if (loaded != null) {
-                for (TrashItem item : loaded) {
-                    FLog.d(TAG, "Trash item: " + item.getOriginalDisplayName() + " -> " + item.getTrashFileName());
-                }
-            }
+            List<TrashItem> loaded = readRemainingItems(context, Collections.emptyList());
             mainHandler.post(() -> {
-                items.clear();
-                if (loaded != null) items.addAll(loaded);
-                updateEmptyState();
-                adapter.notifyDataSetChanged();
+                if (!ownsView(view) || request != loadGeneration || actionInFlight) return;
+                replaceItems(loaded);
             });
         });
+    }
+
+    /** A bulk operation can remove some files before its metadata write fails. */
+    private List<TrashItem> readRemainingItems(Context context, List<TrashItem> fallback) {
+        List<TrashItem> loaded = TrashManager.loadTrashMetadata(context);
+        // A failed mutation plus an unreadable metadata file may look like an empty list.
+        List<TrashItem> remaining = new ArrayList<>(loaded == null || loaded.isEmpty() ? fallback : loaded);
+        remaining.removeIf(java.util.Objects::isNull);
+        try {
+            File directory = TrashManager.getTrashDirectory(context);
+            if (directory != null) {
+                File root = directory.getCanonicalFile();
+                remaining.removeIf(item -> definitelyMissing(root,
+                        TrashManager.resolveTrashFile(root, item.getTrashFileName())));
+            }
+        } catch (java.io.IOException | SecurityException error) {
+            FLog.w(TAG, "Could not verify missing Watch trash rows", error);
+        }
+        return remaining;
+    }
+
+    private static boolean definitelyMissing(File root, @Nullable File file) {
+        // Keep uncertain/inaccessible rows. Only a successfully listed parent can prove absence.
+        for (File child = file; child != null && !child.equals(root); child = child.getParentFile()) {
+            File parent = child.getParentFile();
+            if (parent == null) break;
+            String[] children = parent.list();
+            if (children != null) {
+                for (String name : children) if (name.equals(child.getName())) return false;
+                return true;
+            }
+            if (parent.exists()) break;
+        }
+        return false;
+    }
+
+    private void replaceItems(List<TrashItem> loaded) {
+        items.clear();
+        items.addAll(loaded);
+        adapter.notifyDataSetChanged();
+        updateEmptyState();
     }
 
     private void updateEmptyState() {
@@ -137,100 +185,138 @@ public class WatchTrashFragment extends Fragment {
         recyclerView.setVisibility(empty ? View.GONE : View.VISIBLE);
         tvEmpty.setVisibility(empty ? View.VISIBLE : View.GONE);
         btnDeleteAll.setVisibility(empty ? View.GONE : View.VISIBLE);
+        btnDeleteAll.setEnabled(!actionInFlight);
     }
 
-    // -------------------------------------------------------------------------
-    // Actions
-    // -------------------------------------------------------------------------
+    private boolean beginAction() {
+        if (actionInFlight || !ownsView(viewGeneration) || executor.isShutdown()) return false;
+        actionInFlight = true;
+        ++loadGeneration;
+        updateEmptyState();
+        return true;
+    }
+
+    private boolean finishAction(long view) {
+        actionInFlight = false;
+        if (!ownsView(view)) {
+            // A replacement view may need a fresh load, but never an old action result/toast.
+            loadItems();
+            return false;
+        }
+        updateEmptyState();
+        return true;
+    }
+
+    private void removeItem(TrashItem item) {
+        int current = items.indexOf(item);
+        if (current >= 0) {
+            items.remove(current);
+            adapter.notifyItemRemoved(current);
+            updateEmptyState();
+        }
+    }
 
     private void restoreItem(int position) {
-        if (position < 0 || position >= items.size()) return;
+        if (position < 0 || position >= items.size() || !beginAction()) return;
         final TrashItem item = items.get(position);
+        final Context context = requireContext().getApplicationContext();
+        final long view = viewGeneration;
         executor.execute(() -> {
-            boolean ok = false;
+            boolean ok;
             try {
-                ok = TrashManager.restoreWatchItem(requireContext(), item);
-            } catch (Exception e) {
+                ok = TrashManager.restoreWatchItem(context, item);
+            } catch (RuntimeException e) {
                 FLog.e(TAG, "restoreItem failed", e);
+                ok = false;
             }
-
-            final boolean finalOk = ok;
+            final boolean success = ok;
             mainHandler.post(() -> {
-                if (!isAdded()) return;
-                if (finalOk) {
-                    int current = items.indexOf(item);
-                    if (current >= 0) {
-                        items.remove(current);
-                        adapter.notifyItemRemoved(current);
-                        updateEmptyState();
-                    }
-                    Toast.makeText(requireContext(),
-                            getString(R.string.trash_restore_success_toast, 1),
-                            Toast.LENGTH_SHORT).show();
-                } else {
-                    Toast.makeText(requireContext(),
-                            R.string.trash_restore_fail_toast,
-                            Toast.LENGTH_SHORT).show();
-                }
+                if (!finishAction(view)) return;
+                if (success) removeItem(item);
+                Toast.makeText(requireContext(), success
+                        ? getString(R.string.trash_restore_success_toast, 1)
+                        : getString(R.string.trash_restore_fail_toast), Toast.LENGTH_SHORT).show();
             });
         });
     }
 
     private void confirmDeleteItem(int position) {
-        if (position < 0 || position >= items.size()) return;
-        final String name = items.get(position).getOriginalDisplayName();
+        if (actionInFlight || position < 0 || position >= items.size()) return;
+        final TrashItem item = items.get(position);
+        final String name = item.getOriginalDisplayName();
+        final long view = viewGeneration;
         new AlertDialog.Builder(requireContext(), R.style.WatchDeleteConfirmDialog)
                 .setTitle(R.string.watch_perm_delete_title)
                 .setMessage(getString(R.string.watch_perm_delete_msg, name != null ? name : ""))
-                .setPositiveButton(R.string.watch_perm_delete_action, (d, w) -> deleteItem(position))
+                .setPositiveButton(R.string.watch_perm_delete_action, (d, w) -> {
+                    if (ownsView(view) && items.contains(item)) deleteItem(item);
+                })
                 .setNegativeButton(android.R.string.cancel, null)
                 .show();
     }
 
     private void confirmDeleteAll() {
-        if (items.isEmpty()) return;
+        if (actionInFlight || items.isEmpty()) return;
+        final long view = viewGeneration;
         new AlertDialog.Builder(requireContext(), R.style.WatchDeleteConfirmDialog)
                 .setTitle(R.string.watch_perm_delete_all_title)
                 .setMessage(getString(R.string.watch_perm_delete_all_msg, items.size()))
-                .setPositiveButton(R.string.watch_perm_delete_action, (d, w) -> deleteAll())
+                .setPositiveButton(R.string.watch_perm_delete_action, (d, w) -> {
+                    if (ownsView(view)) deleteAll();
+                })
                 .setNegativeButton(android.R.string.cancel, null)
                 .show();
     }
 
-    private void deleteItem(int position) {
-        if (position < 0 || position >= items.size()) return;
-        final TrashItem item = items.get(position);
+    private void deleteItem(TrashItem item) {
+        if (!beginAction()) return;
+        final Context context = requireContext().getApplicationContext();
+        final long view = viewGeneration;
         executor.execute(() -> {
-            final List<TrashItem> single = new ArrayList<>();
-            single.add(item);
-            TrashManager.permanentlyDeleteItems(requireContext(), single);
+            boolean ok;
+            try {
+                ok = TrashManager.permanentlyDeleteItems(context, Collections.singletonList(item));
+            } catch (RuntimeException error) {
+                FLog.e(TAG, "deleteItem failed", error);
+                ok = false;
+            }
+            final boolean success = ok;
             mainHandler.post(() -> {
-                if (!isAdded()) return;
-                items.remove(position);
-                adapter.notifyItemRemoved(position);
-                updateEmptyState();
-                Toast.makeText(requireContext(),
-                        getString(R.string.trash_items_deleted_toast, 1),
-                        Toast.LENGTH_SHORT).show();
+                if (!finishAction(view)) return;
+                if (success) removeItem(item);
+                showDeleteResult(success, 1);
             });
         });
     }
 
     private void deleteAll() {
-        if (items.isEmpty()) return;
+        if (items.isEmpty() || !beginAction()) return;
+        final Context context = requireContext().getApplicationContext();
+        final long view = viewGeneration;
+        final List<TrashItem> requested = new ArrayList<>(items);
+        final int count = requested.size();
         executor.execute(() -> {
-            TrashManager.emptyAllTrash(requireContext());
+            boolean ok;
+            try {
+                ok = TrashManager.emptyAllTrash(context);
+            } catch (RuntimeException error) {
+                FLog.e(TAG, "deleteAll failed", error);
+                ok = false;
+            }
+            final boolean success = ok;
+            final List<TrashItem> remaining = readRemainingItems(context, success ? Collections.emptyList() : requested);
             mainHandler.post(() -> {
-                if (!isAdded()) return;
-                final int count = items.size();
-                items.clear();
-                adapter.notifyDataSetChanged();
-                updateEmptyState();
-                Toast.makeText(requireContext(),
-                        getString(R.string.trash_items_deleted_toast, count),
-                        Toast.LENGTH_SHORT).show();
+                if (!finishAction(view)) return;
+                replaceItems(remaining);
+                showDeleteResult(success, count);
             });
         });
+    }
+
+    private void showDeleteResult(boolean success, int count) {
+        Toast.makeText(requireContext(), success
+                ? getString(R.string.trash_items_deleted_toast, count)
+                : getString(R.string.trash_error_deleting_items_toast), Toast.LENGTH_SHORT).show();
     }
 
     // -------------------------------------------------------------------------
@@ -298,12 +384,14 @@ public class WatchTrashFragment extends Fragment {
             holder.ivThumb.setImageBitmap(null);
             holder.ivThumb.setBackgroundColor(0xFF1A1A1A); // dark placeholder, clipped by ViewOutlineProvider
             final String trashFileName = item.getTrashFileName();
-            if (trashFileName != null) {
+            if (trashFileName != null && !executor.isShutdown()) {
+                final Context context = holder.itemView.getContext().getApplicationContext();
+                final long view = viewGeneration;
                 executor.execute(() -> {
                     Bitmap bmp = null;
                     android.media.MediaMetadataRetriever retriever = null;
                     try {
-                        final File trashDir = TrashManager.getTrashDirectory(requireContext());
+                        final File trashDir = TrashManager.getTrashDirectory(context);
                         final File videoFile = TrashManager.resolveTrashFile(trashDir, trashFileName);
                         if (videoFile != null) {
                             FLog.d(TAG, "Loading trash thumbnail: " + videoFile.getAbsolutePath());
@@ -328,8 +416,13 @@ public class WatchTrashFragment extends Fragment {
                     }
                     final Bitmap finalBmp = bmp;
                     mainHandler.post(() -> {
-                        if (finalBmp != null && holder.getBindingAdapterPosition() == position) {
+                        int current = holder.getBindingAdapterPosition();
+                        if (finalBmp == null) return;
+                        if (ownsView(view) && current >= 0 && current < items.size()
+                                && item.equals(items.get(current))) {
                             holder.ivThumb.setImageBitmap(finalBmp);
+                        } else {
+                            finalBmp.recycle();
                         }
                     });
                 });

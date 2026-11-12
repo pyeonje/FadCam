@@ -2479,14 +2479,17 @@ public class RecordingService extends Service {
 
     // --- Core Recording Logic ---
     private void stopRecording() {
-        if (durationLimitController != null && durationLimitController.stopSession()) {
-            FLog.d(TAG, "Cancelled maximum recording duration for current session");
-        }
         final com.fadcam.opengl.GLRecordingPipeline requestedPipeline;
         final boolean recordingActuallyStarted;
         synchronized (this) {
-            if (isStopping) {
+            if (isStopping || cameraGlShutdownPending) {
                 FLog.w(TAG, "stopRecording: Already in stopping process, ignoring duplicate call");
+                return;
+            }
+            if (recordingState == RecordingState.NONE) {
+                // A recording stop is a no-op for preview; real teardown belongs to its owner.
+                // An idle service can still stop, with onDestroy owning its resource cleanup.
+                if (!isWorkingInProgress()) stopSelf();
                 return;
             }
             finalizingTimelineMs = getEffectiveTimelineMs();
@@ -2496,6 +2499,9 @@ public class RecordingService extends Service {
             // STARTING may have no camera or only a prepared, preview-capable pipeline.
             recordingActuallyStarted = recordingStartTime > 0L;
             if (requestedPipeline != null) requestedPipeline.requestOutputStop();
+        }
+        if (durationLimitController != null && durationLimitController.stopSession()) {
+            FLog.d(TAG, "Cancelled maximum recording duration for current session");
         }
         final String inFlightUri = getCurrentRecordingMediaUri();
         addInFlightFinalization(inFlightUri);
@@ -2507,37 +2513,6 @@ public class RecordingService extends Service {
 
         // Stop reconnection attempts if active
         stopReconnectionAttempts();
-
-        if (recordingState == RecordingState.NONE) {
-            FLog.d(TAG, "stopRecording called but state is already NONE, just cleaning up");
-            sharedPreferencesManager.setRecordingInProgress(false);
-            if (!isWorkingInProgress())
-                stopSelf();
-            if (recordingWakeLock != null && recordingWakeLock.isHeld())
-                recordingWakeLock.release();
-            if (safRecordingPfd != null) {
-                try {
-                    safRecordingPfd.close();
-                    // log removed
-                } catch (Exception e) {
-                    FLog.e(TAG, "Error closing SAF ParcelFileDescriptor", e);
-                }
-                safRecordingPfd = null;
-            }
-            // ⚠️ Also close segment PFD if it exists
-            if (currentSegmentParcelFileDescriptor != null) {
-                try {
-                    currentSegmentParcelFileDescriptor.close();
-                    FLog.d(TAG, "Closed current segment ParcelFileDescriptor during early cleanup");
-                } catch (Exception e) {
-                    FLog.e(TAG, "Error closing segment PFD during early cleanup", e);
-                }
-                currentSegmentParcelFileDescriptor = null;
-            }
-            removeInFlightFinalization(inFlightUri);
-            isStopping = false; // Reset stopping flag if we're already stopped
-            return;
-        }
 
         if (motionLabEnabledForSession) {
             FLog.i(TAG, "MotionLab summary: frames=" + motionFramesAnalyzed

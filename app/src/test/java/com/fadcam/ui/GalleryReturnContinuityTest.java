@@ -296,4 +296,61 @@ public class GalleryReturnContinuityTest {
         assertEquals(Arrays.asList(original),loaded(grid));verifyNoInteractions(adapter);
     }
 
+    @Test public void consecutiveManualRefreshesWhileTheFirstWorkerIsPendingPublishOnlyLatest() {
+        RecordsFragment grid=spy(new RecordsFragment());doReturn(true).when(grid).isAdded();
+        VideoItem initial=media(1),first=media(2),middle=media(3),latest=media(4);data(grid,initial);
+        SharedPreferencesManager settings=mock(SharedPreferencesManager.class);
+        ReflectionHelpers.setField(grid,"sharedPreferencesManager",settings);
+        RecordsAdapter adapter=mock(RecordsAdapter.class);ReflectionHelpers.setField(grid,"recordsAdapter",adapter);
+        VideoIndexRepository repository=mock(VideoIndexRepository.class);
+        when(repository.deltaScan(settings)).thenReturn(Arrays.asList(first),Arrays.asList(middle),Arrays.asList(latest));
+        List<Runnable> pending=new ArrayList<>();
+        ExecutorService executor=mock(ExecutorService.class);
+        when(executor.submit(any(Runnable.class))).thenAnswer(inv->{pending.add(inv.getArgument(0));return mock(Future.class);});
+        ReflectionHelpers.setField(grid,"deltaExecutor",executor);
+        for(int i=0;i<3;i++) ReflectionHelpers.callInstanceMethod(grid,"refreshGalleryManually",
+                ReflectionHelpers.ClassParameter.from(VideoIndexRepository.class,repository));
+        for(int i=0;i<2;i++) {
+            pending.get(i).run();
+            Shadows.shadowOf(Looper.getMainLooper()).idle();
+            assertEquals(Arrays.asList(initial),loaded(grid));
+        }
+        verifyNoInteractions(adapter);
+        pending.get(2).run();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(Arrays.asList(latest),loaded(grid));
+        verify(adapter).updateRecords(anyList());
+    }
+
+    @Test public void repeatedForceDuringLoadQueuesExactlyOneFollowup() {
+        RecordsFragment grid=spy(new RecordsFragment());doReturn(true).when(grid).isAdded();
+        android.content.Context app=org.robolectric.RuntimeEnvironment.getApplication();
+        doReturn(app).when(grid).requireContext();
+        VideoItem initial=media(1),first=media(2),followup=media(3);data(grid,initial);
+        SharedPreferencesManager settings=mock(SharedPreferencesManager.class);
+        ReflectionHelpers.setField(grid,"sharedPreferencesManager",settings);
+        RecordsAdapter adapter=mock(RecordsAdapter.class);ReflectionHelpers.setField(grid,"recordsAdapter",adapter);
+        VideoIndexRepository repository=mock(VideoIndexRepository.class);
+        when(repository.deltaScan(settings)).thenReturn(Arrays.asList(first),Arrays.asList(followup));
+        List<Runnable> pending=new ArrayList<>();
+        ExecutorService executor=mock(ExecutorService.class);
+        when(executor.submit(any(Runnable.class))).thenAnswer(inv->{pending.add(inv.getArgument(0));return mock(Future.class);});
+        ReflectionHelpers.setField(grid,"deltaExecutor",executor);
+        VideoIndexRepository previous=ReflectionHelpers.getStaticField(VideoIndexRepository.class,"instance");
+        ReflectionHelpers.setStaticField(VideoIndexRepository.class,"instance",repository);
+        try {
+            for(int i=0;i<3;i++) ReflectionHelpers.callInstanceMethod(grid,"loadRecordsList",
+                    ReflectionHelpers.ClassParameter.from(boolean.class,true));
+            assertEquals(1,pending.size());
+            pending.get(0).run();Shadows.shadowOf(Looper.getMainLooper()).idle();
+            assertEquals(2,pending.size());
+            pending.get(1).run();Shadows.shadowOf(Looper.getMainLooper()).idle();
+            assertEquals(Arrays.asList(followup),loaded(grid));
+            assertEquals(2,pending.size());
+            assertFalse(ReflectionHelpers.<Boolean>getField(grid,"pendingForcedRealtimeReload"));
+        } finally {
+            ReflectionHelpers.setStaticField(VideoIndexRepository.class,"instance",previous);
+        }
+    }
+
 }
