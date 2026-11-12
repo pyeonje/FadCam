@@ -396,7 +396,7 @@ public class RecordsFragment extends BaseFragment implements
     private Runnable deferredRecordsWarmupRunnable;
     private Runnable deferredRecordsDeltaScanRunnable;
     // Main-looper ownership for deferred scan results; foreground refresh takes precedence.
-    private long deferredRecordsScanGeneration;
+    private long galleryRequestGeneration;
     private static final long RECORDS_INITIAL_METADATA_DELAY_MS = 350L;
     private static final long RECORDS_INITIAL_DELTA_SCAN_DELAY_MS = 1200L;
     private TextView titleText;
@@ -1245,7 +1245,10 @@ public class RecordsFragment extends BaseFragment implements
     // *** Unregister in onStop ***
     @Override
     public void onStop() {
-        ++deferredRecordsScanGeneration;
+        ++galleryRequestGeneration;
+        if (isLoading) pendingForcedRealtimeReload = true;
+        isLoading = false;
+        if (swipeRefreshLayout != null) swipeRefreshLayout.setRefreshing(false);
         super.onStop();
         if (progressHandler != null) {
             if (deferredRecordsWarmupRunnable != null) {
@@ -1858,66 +1861,7 @@ public class RecordsFragment extends BaseFragment implements
                     FLog.w(TAG, "Self-healing scan on refresh failed", e);
                 }
 
-                // Production pattern: keep existing data visible, refresh silently
-                // in background, swap data when ready. No skeleton, no UI thrashing.
-
-                ++deferredRecordsScanGeneration;
-                // Cancel any in-progress delta scan from a previous refresh
-                if (deltaExecutor != null && !deltaExecutor.isShutdown()) {
-                    deltaExecutor.shutdownNow();
-                }
-                deltaExecutor = Executors.newSingleThreadExecutor();
-
-                // Invalidate stats cache
-                com.fadcam.utils.VideoStatsCache.invalidateStats(sharedPreferencesManager);
-
-                // Silent background refresh — keep current content visible
-                final com.fadcam.data.VideoIndexRepository repo =
-                        com.fadcam.data.VideoIndexRepository.getInstance(requireContext());
-
-                deltaExecutor.submit(() -> {
-                    try {
-                        // Phase 1: Quick DB read (sub-50ms) — no skeleton needed
-                        List<VideoItem> dbItems = repo.getVideos(sharedPreferencesManager);
-                        List<VideoItem> normalized = normalizeVideoCategories(dbItems);
-                        sortItems(normalized, currentSortOption);
-
-                        // Phase 2: Delta scan for freshness (picks up new/deleted files)
-                        List<VideoItem> deltaItems = repo.deltaScan(sharedPreferencesManager);
-                        List<VideoItem> deltaNormalized = normalizeVideoCategories(deltaItems);
-                        sortItems(deltaNormalized, currentSortOption);
-                        totalItems = deltaNormalized.size();
-
-                        // Keep caches in sync
-                        com.fadcam.utils.VideoSessionCache.updateSessionCache(deltaNormalized);
-
-                        // Push final data to UI in one smooth update
-                        new Handler(Looper.getMainLooper()).post(() -> {
-                            if (!isAdded()) return;
-
-                            allLoadedItems.clear();
-                            allLoadedItems.addAll(deltaNormalized);
-                            applyActiveFilterToUi();
-
-                            if (swipeRefreshLayout != null) {
-                                swipeRefreshLayout.setRefreshing(false);
-                            }
-                            FLog.i(TAG, "Silent refresh complete: " + deltaNormalized.size() + " items");
-                        });
-
-                        // Enrich any new unresolved durations
-                        repo.startBackgroundEnrichment((uri, dur) ->
-                            FLog.d(TAG, "Duration enriched: " + uri + " → " + dur + "ms"));
-
-                    } catch (Exception e) {
-                        FLog.w(TAG, "Silent refresh failed: " + e.getMessage());
-                        new Handler(Looper.getMainLooper()).post(() -> {
-                            if (swipeRefreshLayout != null) {
-                                swipeRefreshLayout.setRefreshing(false);
-                            }
-                        });
-                    }
-                });
+                refreshGalleryManually(com.fadcam.data.VideoIndexRepository.getInstance(requireContext()));
 
             });
         } else {
@@ -5344,7 +5288,7 @@ public class RecordsFragment extends BaseFragment implements
 
     @Override
     public void onDestroyView() {
-        ++deferredRecordsScanGeneration;
+        ++galleryRequestGeneration;
         if (gridPinch != null) { gridPinch.close(); gridPinch = null; }
         clearPendingGridAnchor();
         if (recyclerView != null) recyclerView.removeCallbacks(adaptiveGridUpdate);
@@ -5743,7 +5687,6 @@ public class RecordsFragment extends BaseFragment implements
     }
 
     private void prepareRecordsFirstPaint() {
-        ++deferredRecordsScanGeneration;
         if (recordsAdapter != null) {
             recordsAdapter.setDeferHeavyMetadataWork(true);
         }
@@ -5753,6 +5696,59 @@ public class RecordsFragment extends BaseFragment implements
         if (progressHandler != null && deferredRecordsDeltaScanRunnable != null) {
             progressHandler.removeCallbacks(deferredRecordsDeltaScanRunnable);
         }
+    }
+
+    // Main looper owns request allocation and all cache/UI publication.
+    private long beginGalleryRequest() {
+        if (progressHandler != null && deferredRecordsDeltaScanRunnable != null) {
+            progressHandler.removeCallbacks(deferredRecordsDeltaScanRunnable);
+        }
+        return ++galleryRequestGeneration;
+    }
+
+    private void postGalleryResult(long generation, Runnable apply) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (isAdded() && generation == galleryRequestGeneration) apply.run();
+        });
+    }
+
+    private void refreshGalleryManually(@NonNull com.fadcam.data.VideoIndexRepository repository) {
+        final long generation = beginGalleryRequest();
+        final SortOption sort = currentSortOption;
+        if (deltaExecutor == null || deltaExecutor.isShutdown()) {
+            deltaExecutor = Executors.newSingleThreadExecutor();
+        }
+        com.fadcam.utils.VideoStatsCache.invalidateStats(sharedPreferencesManager);
+        deltaExecutor.submit(() -> {
+            try {
+                List<VideoItem> fresh = normalizeVideoCategories(repository.deltaScan(sharedPreferencesManager));
+                sortItems(fresh, sort);
+                postGalleryResult(generation, () -> {
+                    if (recordsAdapter != null && recordsAdapter.isSkeletonMode()) {
+                        recordsAdapter.setSkeletonMode(false);
+                    }
+                    isLoading = false;
+                    isInitialLoad = false;
+                    if (swipeRefreshLayout != null) swipeRefreshLayout.setRefreshing(false);
+                    publishGallerySnapshot(fresh, sort);
+                    updateUiVisibility();
+                    repository.startBackgroundEnrichment((uri, duration) -> {});
+                    drainPendingRealtimeRefresh();
+                });
+            } catch (Exception e) {
+                FLog.w(TAG, "Manual records refresh failed", e);
+                postGalleryResult(generation, this::handleLoadingError);
+            }
+        });
+    }
+
+    private void publishGallerySnapshot(List<VideoItem> items, SortOption sort) {
+        if (sort != currentSortOption) sortItems(items, currentSortOption);
+        totalItems = items.size();
+        allLoadedItems.clear();
+        allLoadedItems.addAll(items);
+        com.fadcam.utils.VideoSessionCache.updateSessionCache(items);
+        applyActiveFilterToUi();
     }
 
     private void scheduleRecordsPostFirstPaintWork(@NonNull com.fadcam.data.VideoIndexRepository repository) {
@@ -5783,21 +5779,15 @@ public class RecordsFragment extends BaseFragment implements
             if (deltaExecutor == null || deltaExecutor.isShutdown()) {
                 deltaExecutor = Executors.newSingleThreadExecutor();
             }
-            final long generation = ++deferredRecordsScanGeneration;
-            final SortOption scanSort = currentSortOption;
+            final long generation = ++galleryRequestGeneration;
+            final SortOption sort = currentSortOption;
             deltaExecutor.submit(() -> {
                 try {
                     List<VideoItem> delta = normalizeVideoCategories(repository.deltaScan(sharedPreferencesManager));
-                    sortItems(delta, scanSort);
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        if (!isAdded() || generation != deferredRecordsScanGeneration) return;
-                        if (scanSort != currentSortOption) sortItems(delta, currentSortOption);
-                        if (sameGallerySnapshot(allLoadedItems, delta)) return;
-                        totalItems = delta.size();
-                        allLoadedItems.clear();
-                        allLoadedItems.addAll(delta);
-                        com.fadcam.utils.VideoSessionCache.updateSessionCache(delta);
-                        applyActiveFilterToUi();
+                    sortItems(delta, sort);
+                    postGalleryResult(generation, () -> {
+                        if (sort != currentSortOption) sortItems(delta, currentSortOption);
+                        if (!sameGallerySnapshot(allLoadedItems, delta)) publishGallerySnapshot(delta, currentSortOption);
                     });
                 } catch (Exception e) {
                     FLog.w(TAG, "Delta scan failed (non-fatal): " + e.getMessage());
@@ -5828,28 +5818,25 @@ public class RecordsFragment extends BaseFragment implements
 
     /** Refresh a warm grid once from the final filesystem view, never stale DB then delta. */
     private void refreshLoadedRecords(@NonNull com.fadcam.data.VideoIndexRepository repository) {
-        ++deferredRecordsScanGeneration;
+        final long generation = beginGalleryRequest();
+        final SortOption sort = currentSortOption;
         if (deltaExecutor == null || deltaExecutor.isShutdown()) {
             deltaExecutor = Executors.newSingleThreadExecutor();
         }
         deltaExecutor.submit(() -> {
             try {
                 List<VideoItem> fresh = normalizeVideoCategories(repository.deltaScan(sharedPreferencesManager));
-                sortItems(fresh, currentSortOption);
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    if (!isAdded()) return;
-                    totalItems = fresh.size();
-                    allLoadedItems.clear();
-                    allLoadedItems.addAll(fresh);
-                    com.fadcam.utils.VideoSessionCache.updateSessionCache(fresh);
+                sortItems(fresh, sort);
+                postGalleryResult(generation, () -> {
                     isLoading = false;
                     isInitialLoad = false;
-                    applyActiveFilterToUi();
+                    if (swipeRefreshLayout != null) swipeRefreshLayout.setRefreshing(false);
+                    publishGallerySnapshot(fresh, sort);
                     drainPendingRealtimeRefresh();
                 });
             } catch (Exception e) {
                 FLog.w(TAG, "Warm records refresh failed; retaining displayed grid", e);
-                new Handler(Looper.getMainLooper()).post(this::handleLoadingError);
+                postGalleryResult(generation, this::handleLoadingError);
             }
         });
     }
@@ -5885,6 +5872,8 @@ public class RecordsFragment extends BaseFragment implements
             refreshLoadedRecords(repository);
             return;
         }
+        final long generation = beginGalleryRequest();
+        final SortOption sort = currentSortOption;
         prepareRecordsFirstPaint();
 
         final int indexedCount = repository.getIndexedCount();
@@ -5910,34 +5899,17 @@ public class RecordsFragment extends BaseFragment implements
 
             executorService.submit(() -> {
                 try {
-                    long loadStart = System.currentTimeMillis();
-
                     // DB read on background thread (Room requires this)
                     List<VideoItem> items = repository.getVideos(sharedPreferencesManager);
                     List<VideoItem> normalized = normalizeVideoCategories(items);
-                    sortItems(normalized, currentSortOption);
-                    totalItems = normalized.size();
-
-                    long loadElapsed = System.currentTimeMillis() - loadStart;
-                    FLog.i(TAG, "loadRecordsList: DB fast path — " + normalized.size() + " items in " + loadElapsed + "ms (no skeleton)");
-
-                    // Keep caches in sync
-                    com.fadcam.utils.VideoSessionCache.updateSessionCache(normalized);
-
-                    // Digital forensics indexing (non-blocking)
-                    DigitalForensicsIndexCoordinator.getInstance(requireContext()).enqueueIndex(normalized);
-
-                    // Deliver directly to UI — no skeleton transition
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        if (!isAdded()) return;
-
+                    sortItems(normalized, sort);
+                    postGalleryResult(generation, () -> {
+                        DigitalForensicsIndexCoordinator.getInstance(requireContext()).enqueueIndex(normalized);
                         if (recordsAdapter != null && recordsAdapter.isSkeletonMode()) {
                             recordsAdapter.setSkeletonMode(false);
                         }
-                        allLoadedItems.clear();
-                        allLoadedItems.addAll(normalized);
                         isLoading = false;
-                        applyActiveFilterToUi();
+                        publishGallerySnapshot(normalized, sort);
                         updateUiVisibility();
                         isInitialLoad = false;
                         drainPendingRealtimeRefresh();
@@ -5952,7 +5924,7 @@ public class RecordsFragment extends BaseFragment implements
 
                 } catch (Exception e) {
                     FLog.e(TAG, "Error in loadRecordsList fast path", e);
-                    new Handler(Looper.getMainLooper()).post(() -> handleLoadingError());
+                    postGalleryResult(generation, this::handleLoadingError);
                 }
             });
             return;
@@ -5984,32 +5956,21 @@ public class RecordsFragment extends BaseFragment implements
 
         executorService.submit(() -> {
             try {
-                long loadStart = System.currentTimeMillis();
-
                 // Full scan — DB is empty so getVideos() will do a full SAF scan
                 List<VideoItem> items = repository.getVideos(sharedPreferencesManager);
                 List<VideoItem> normalized = normalizeVideoCategories(items);
-                sortItems(normalized, currentSortOption);
-                totalItems = normalized.size();
-
-                long loadElapsed = System.currentTimeMillis() - loadStart;
-                FLog.i(TAG, "loadRecordsList: Cold start — " + normalized.size() + " items ready in " + loadElapsed + "ms");
-
-                // Digital forensics indexing (non-blocking)
-                DigitalForensicsIndexCoordinator.getInstance(requireContext()).enqueueIndex(normalized);
-
-                // Deliver results to UI — replaces skeleton
-                new Handler(Looper.getMainLooper()).post(() -> {
+                sortItems(normalized, sort);
+                postGalleryResult(generation, () -> {
+                    if (sort != currentSortOption) sortItems(normalized, currentSortOption);
+                    totalItems = normalized.size();
+                    com.fadcam.utils.VideoSessionCache.updateSessionCache(normalized);
+                    DigitalForensicsIndexCoordinator.getInstance(requireContext()).enqueueIndex(normalized);
                     replaceSkeletonsWithData(normalized);
                     scheduleRecordsPostFirstPaintWork(repository);
                 });
-
-                // Keep VideoSessionCache in sync
-                com.fadcam.utils.VideoSessionCache.updateSessionCache(normalized);
-
             } catch (Exception e) {
                 FLog.e(TAG, "Error in loadRecordsList", e);
-                handleLoadingError();
+                postGalleryResult(generation, this::handleLoadingError);
             }
         });
     }

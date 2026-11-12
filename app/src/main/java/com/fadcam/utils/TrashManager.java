@@ -79,7 +79,8 @@ public class TrashManager {
             FLog.e(TAG, "External files directory is null, cannot get trash directory.");
             return null;
         }
-        File trashDir = new File(externalFilesDir, Constants.TRASH_DIRECTORY_NAME);
+        File trashDir = safeChild(externalFilesDir, Constants.TRASH_DIRECTORY_NAME);
+        if (trashDir == null) return null;
         if (!trashDir.exists()) {
             if (trashDir.mkdirs()) {
                 FLog.i(TAG, "Trash directory created at: " + trashDir.getAbsolutePath());
@@ -88,7 +89,41 @@ public class TrashManager {
                 return null; // Failed to create
             }
         }
-        return trashDir;
+        return trashDir.isDirectory() ? trashDir : null;
+    }
+
+    private static boolean isBasename(String name) {
+        return name != null && !name.trim().isEmpty() && !name.equals(".") && !name.equals("..")
+                && name.indexOf('/') < 0 && name.indexOf('\\') < 0 && name.indexOf(':') < 0
+                && name.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    @Nullable
+    private static File safeChild(File parent, String name) {
+        if (parent == null || !isBasename(name)) return null;
+        try {
+            File canonicalParent = parent.getCanonicalFile();
+            File child = new File(canonicalParent, name);
+            // Refuse links or path aliases, including links to other files inside the same tree.
+            return child.equals(child.getCanonicalFile())
+                    && (android.os.Build.VERSION.SDK_INT < 26 || !java.nio.file.Files.isSymbolicLink(child.toPath()))
+                    ? child : null;
+        } catch (IOException | RuntimeException unsafe) {
+            return null;
+        }
+    }
+
+    /** Resolve a legacy root or category-relative name without following a link outside trash. */
+    @Nullable
+    public static File resolveTrashFile(File trashDir, String storedName) {
+        if (storedName == null || trashDir == null) return null;
+        String[] parts = storedName.split("/", -1);
+        File current = trashDir;
+        for (String part : parts) {
+            current = safeChild(current, part);
+            if (current == null) return null;
+        }
+        return current;
     }
 
     /**
@@ -128,7 +163,8 @@ public class TrashManager {
                 TrashItem item = new Gson().fromJson(new String(new AtomicFile(record).readFully(),
                         StandardCharsets.UTF_8), TrashItem.class);
                 if (item == null || item.getTrashFileName() == null) continue;
-                File file = new File(trashDir, item.getTrashFileName());
+                File file = resolveTrashFile(trashDir, item.getTrashFileName());
+                if (file == null) continue;
                 if (!file.isFile()) {
                     reconciled.add(record);
                     continue;
@@ -145,13 +181,12 @@ public class TrashManager {
                 RestoreRecord restore = new Gson().fromJson(new String(new AtomicFile(record).readFully(),
                         StandardCharsets.UTF_8), RestoreRecord.class);
                 if (restore == null || restore.item == null || restore.destination == null) continue;
-                File original = new File(trashDir, restore.item.getTrashFileName());
+                File original = resolveTrashFile(trashDir, restore.item.getTrashFileName());
+                if (original == null || restore.digest == null) continue;
                 // Keep the trash entry unless a completed destination can be identified.
                 Uri destination = Uri.parse(restore.destination);
-                if (!original.exists() && (restore.digest != null
-                        ? CopyIntegrity.matches(context.getContentResolver().openInputStream(destination),
-                                restore.bytes, restore.digest)
-                        : getUriSize(context, destination) == restore.bytes)) {
+                if (!original.exists() && CopyIntegrity.matches(openRestoreDestination(context, destination),
+                        restore.bytes, restore.digest)) {
                     items.remove(restore.item);
                     reconciled.add(record);
                 }
@@ -282,7 +317,8 @@ public class TrashManager {
         }
 
         String targetTrashFileName = getUniqueTrashFileName(trashDir, originalDisplayName, subDirectory);
-        File targetTrashFile = new File(trashDir, targetTrashFileName);
+        File targetTrashFile = resolveTrashFile(trashDir, targetTrashFileName);
+        if (targetTrashFile == null) return false;
         File targetParent = targetTrashFile.getParentFile();
         if (targetParent != null && !targetParent.exists() && !targetParent.mkdirs()) {
             FLog.e(TAG, "moveToTrash: Failed to create target parent folder " + targetParent.getAbsolutePath());
@@ -368,9 +404,8 @@ public class TrashManager {
             // Reserving the name atomically prevents rollback from overwriting a new original.
             if (!original.createNewFile()) return false;
             created = true;
-            long copied = copyClosed(() -> new FileInputStream(trash),
-                    () -> new FileOutputStream(original), trash.length(), null);
-            complete = original.length() == copied;
+            verifyLocalCopy(trash, () -> new FileOutputStream(original), () -> new FileInputStream(original));
+            complete = true;
             return complete && trash.delete();
         } catch (IOException | RuntimeException e) {
             FLog.w(TAG, "휴지통 이동을 원위치로 되돌리지 못했습니다.", e);
@@ -393,8 +428,85 @@ public class TrashManager {
         }
     }
 
-    private static File recordRestore(Context context, TrashItem item, Uri destination, long bytes) {
-        return recordRestore(context, item, destination, bytes, null);
+    private static InputStream openRestoreDestination(Context context, Uri destination) throws IOException {
+        if ("file".equals(destination.getScheme())) {
+            return new FileInputStream(new File(java.net.URI.create(destination.toString())));
+        }
+        return context.getContentResolver().openInputStream(destination);
+    }
+
+    private static final class VerifiedLocalCopy {
+        final long bytes;
+        final byte[] digest;
+        VerifiedLocalCopy(long bytes, byte[] digest) {
+            this.bytes = bytes;
+            this.digest = digest;
+        }
+    }
+
+    private static void checkCopyInterrupted() throws IOException {
+        if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("복사가 중단됐습니다.");
+    }
+
+    private static VerifiedLocalCopy verifyLocalCopy(File source, StreamFactory<OutputStream> output,
+            StreamFactory<InputStream> readback) throws IOException {
+        checkCopyInterrupted();
+        java.security.MessageDigest digest = CopyIntegrity.sha256();
+        long bytes = copyClosed(() -> digesting(new FileInputStream(source), digest), output, source.length(), null);
+        byte[] expected = digest.digest();
+        checkCopyInterrupted();
+        if (!CopyIntegrity.matches(readback.open(), bytes, expected)) throw new IOException("복원 사본이 원본과 다릅니다.");
+        checkCopyInterrupted();
+        return new VerifiedLocalCopy(bytes, expected);
+    }
+
+    @Nullable
+    private static Boolean finishPendingLocalRestore(Context context, TrashItem item, File source,
+            File requestedParent) throws IOException {
+        File folder = new File(context.getFilesDir(), "trash-restore-journal");
+        if (!folder.isDirectory()) return null;
+        File[] files = folder.listFiles((dir, name) -> name.endsWith(".json"));
+        if (files == null) return false;
+        for (File file : files) {
+            RestoreRecord pending = new Gson().fromJson(new String(new AtomicFile(file).readFully(),
+                    StandardCharsets.UTF_8), RestoreRecord.class);
+            if (pending == null || !item.equals(pending.item) || pending.destination == null) continue;
+            Uri destination = Uri.parse(pending.destination);
+            if (!"file".equals(destination.getScheme()) || destination.getPath() == null) continue;
+            File existing = new File(java.net.URI.create(pending.destination));
+            if (!requestedParent.getCanonicalFile().equals(existing.getParentFile())) continue;
+            File verifiedPath = safeChild(requestedParent, existing.getName());
+            // The journal is not proof if either file no longer matches it. Do not duplicate
+            // or remove data when an interrupted operation cannot be reconciled.
+            if (verifiedPath == null || pending.digest == null || !source.isFile() || !verifiedPath.isFile()
+                    || !CopyIntegrity.matches(new FileInputStream(source), pending.bytes, pending.digest)
+                    || !CopyIntegrity.matches(new FileInputStream(verifiedPath), pending.bytes, pending.digest)) {
+                return false;
+            }
+            checkCopyInterrupted();
+            return source.delete();
+        }
+        return null;
+    }
+
+    static boolean restoreLocalFile(Context context, TrashItem item, File source, File destination,
+            StreamFactory<OutputStream> output, StreamFactory<InputStream> readback) throws IOException {
+        checkCopyInterrupted();
+        Boolean resumed = finishPendingLocalRestore(context, item, source, destination.getParentFile());
+        if (resumed != null) return resumed;
+        if (!destination.createNewFile()) return false;
+        boolean journaled = false;
+        try {
+            VerifiedLocalCopy verified = verifyLocalCopy(source, output, readback);
+            File journal = recordRestore(context, item, Uri.parse(destination.toURI().toASCIIString()), verified.bytes, verified.digest);
+            if (journal == null) return false;
+            journaled = true;
+            checkCopyInterrupted();
+            return source.delete();
+        } finally {
+            // Once a verified journal exists, retain both files if source deletion fails.
+            if (!journaled) destination.delete();
+        }
     }
 
     private static File recordRestore(Context context, TrashItem item, Uri destination, long bytes, byte[] digest) {
@@ -412,7 +524,9 @@ public class TrashManager {
             byte[] buffer = new byte[8192];
             int n;
             while ((n = in.read(buffer)) != -1) {
+                checkCopyInterrupted();
                 if (n == 0) throw new IOException("복사가 진행되지 않았습니다.");
+                if (expected >= 0 && n > expected - copied) throw new IOException("사본 크기가 원본과 다릅니다.");
                 out.write(buffer, 0, n);
                 copied += n;
                 dispatchProgress(progress, copied, expected);
@@ -474,14 +588,16 @@ public class TrashManager {
         String normalizedSubdir = (subDirectory == null || subDirectory.trim().isEmpty())
                 ? Constants.TRASH_SUBDIR_VIDEO_RECORDINGS
                 : subDirectory.trim();
-        File scopedDir = new File(trashDir, normalizedSubdir);
+        if (!isBasename(originalDisplayName)) return null;
+        File scopedDir = safeChild(trashDir, normalizedSubdir);
+        if (scopedDir == null) return null;
         if (!scopedDir.exists() && !scopedDir.mkdirs()) {
             FLog.w(TAG, "getUniqueTrashFileName: Could not create scoped dir, falling back to root: " + scopedDir.getAbsolutePath());
             scopedDir = trashDir;
             normalizedSubdir = "";
         }
-        File potentialFile = new File(scopedDir, originalDisplayName);
-        if (!potentialFile.exists()) {
+        File potentialFile = safeChild(scopedDir, originalDisplayName);
+        if (potentialFile != null && !potentialFile.exists()) {
             return normalizedSubdir.isEmpty() ? originalDisplayName : (normalizedSubdir + "/" + originalDisplayName);
         }
 
@@ -498,8 +614,8 @@ public class TrashManager {
         int count = 1;
         while (true) {
             String newName = nameWithoutExtension + " (" + count + ")" + extension;
-            potentialFile = new File(scopedDir, newName);
-            if (!potentialFile.exists()) {
+            potentialFile = safeChild(scopedDir, newName);
+            if (potentialFile != null && !potentialFile.exists()) {
                 FLog.d(TAG, "getUniqueTrashFileName: Generated unique name '" + newName + "' for original '"
                         + originalDisplayName + "'");
                 return normalizedSubdir.isEmpty() ? newName : (normalizedSubdir + "/" + newName);
@@ -541,9 +657,14 @@ public class TrashManager {
         for (TrashItem item : itemsToDelete) {
             if (item == null || item.getTrashFileName() == null) {
                 FLog.w(TAG, "permanentlyDeleteItems: Skipping null item or item with null trashFileName.");
+                allSucceeded = false;
                 continue;
             }
-            File fileToDelete = new File(trashDir, item.getTrashFileName());
+            File fileToDelete = resolveTrashFile(trashDir, item.getTrashFileName());
+            if (fileToDelete == null || (fileToDelete.exists() && !fileToDelete.isFile())) {
+                allSucceeded = false;
+                continue;
+            }
             boolean fileDeleted = true;
             if (fileToDelete.exists()) {
                 if (fileToDelete.delete()) {
@@ -601,7 +722,7 @@ public class TrashManager {
         File[] files = trashDir.listFiles();
         if (files == null) return false;
         for (File file : files) {
-            if (!deleteRecursively(file)) {
+            if (!deleteRecursively(safeChild(trashDir, file.getName()))) {
                 FLog.e(TAG, "emptyAllTrash: Failed to delete path: " + file.getAbsolutePath());
                 allFilesDeleted = false;
             }
@@ -617,17 +738,13 @@ public class TrashManager {
     }
 
     private static boolean deleteRecursively(File file) {
-        if (file == null || !file.exists()) {
-            return true;
-        }
+        if (file == null) return false;
+        if (!file.exists()) return true;
         if (file.isDirectory()) {
             File[] children = file.listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    if (!deleteRecursively(child)) {
-                        return false;
-                    }
-                }
+            if (children == null) return false;
+            for (File child : children) {
+                if (!deleteRecursively(safeChild(file, child.getName()))) return false;
             }
         }
         return file.delete();
@@ -705,44 +822,31 @@ public class TrashManager {
         List<TrashItem> updatedMetadata = new ArrayList<>(currentMetadata);
         boolean allSucceeded = true;
 
+        java.util.Set<TrashItem> processed = new java.util.HashSet<>();
         for (TrashItem item : itemsToRestore) {
             if (item == null || item.getTrashFileName() == null) {
-                FLog.w(TAG, "restoreItemsFromTrash: Skipping null item or item with null trashFileName.");
+                allSucceeded = false;
                 continue;
             }
+            if (!processed.add(item)) continue;
 
-            File fileInTrash = new File(trashDir, item.getTrashFileName());
-            if (!fileInTrash.exists()) {
+            File fileInTrash = resolveTrashFile(trashDir, item.getTrashFileName());
+            if (fileInTrash == null || !fileInTrash.isFile()) {
                 FLog.w(TAG, "복원할 휴지통 파일을 확인하지 못했습니다.");
                 allSucceeded = false;
                 continue;
             }
 
-            // Ensure unique name in target directory (using original display name as base)
             String restoredFileName = getUniqueFileNameInDirectory(targetRestoreDir, item.getOriginalDisplayName());
-            File restoredFile = new File(targetRestoreDir, restoredFileName);
-
+            File restoredFile = safeChild(targetRestoreDir, restoredFileName);
             boolean restoredSuccessfully = false;
-            boolean created = false;
-            boolean complete = false;
-            try {
-                created = restoredFile.createNewFile();
-                if (created) {
-                    long copied = copyClosed(() -> new FileInputStream(fileInTrash),
-                            () -> new FileOutputStream(restoredFile), fileInTrash.length(), null);
-                    if (restoredFile.length() == copied) {
-                        File journal = recordRestore(context, item, Uri.fromFile(restoredFile), copied);
-                        complete = journal != null;
-                        if (complete) {
-                            restoredSuccessfully = fileInTrash.delete();
-                            if (!restoredSuccessfully) new AtomicFile(journal).delete();
-                        }
-                    }
+            if (restoredFile != null) {
+                try {
+                    restoredSuccessfully = restoreLocalFile(context, item, fileInTrash, restoredFile,
+                            () -> new FileOutputStream(restoredFile), () -> new FileInputStream(restoredFile));
+                } catch (IOException | RuntimeException e) {
+                    FLog.e(TAG, "휴지통 파일을 복원하지 못했습니다.", e);
                 }
-            } catch (IOException | RuntimeException e) {
-                FLog.e(TAG, "휴지통 파일을 복원하지 못했습니다.", e);
-            } finally {
-                if (created && !complete) restoredFile.delete();
             }
 
             if (restoredSuccessfully) {
@@ -769,6 +873,38 @@ public class TrashManager {
         }
 
         return allSucceeded;
+    }
+
+    /** Restores watch recordings to their original location only inside the watch Camera tree. */
+    public static synchronized boolean restoreWatchItem(Context context, TrashItem item) {
+        if (context == null || item == null) return false;
+        String originalUri = item.getOriginalUriString();
+        if (originalUri == null || !"file".equalsIgnoreCase(Uri.parse(originalUri).getScheme())) {
+            return restoreItemsFromTrash(context, java.util.Collections.singletonList(item));
+        }
+        File appRoot = safeChild(context.getExternalFilesDir(null), Constants.RECORDING_DIRECTORY);
+        File camera = safeChild(appRoot, Constants.RECORDING_SUBDIR_CAMERA);
+        File source = resolveTrashFile(getTrashDirectory(context), item.getTrashFileName());
+        if (camera == null || source == null || !source.isFile()) return false;
+        try {
+            File original = new File(java.net.URI.create(originalUri));
+            String base = camera.getAbsolutePath() + File.separator;
+            String absolute = original.getAbsolutePath();
+            if (!absolute.startsWith(base)) return false;
+            File requested = resolveTrashFile(camera, absolute.substring(base.length()).replace(File.separatorChar, '/'));
+            if (requested == null) return false;
+            File parent = requested.getParentFile();
+            if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) return false;
+            File destination = safeChild(parent, getUniqueFileNameInDirectory(parent, requested.getName()));
+            if (destination == null || !restoreLocalFile(context, item, source, destination,
+                    () -> new FileOutputStream(destination), () -> new FileInputStream(destination))) return false;
+            List<TrashItem> remaining = loadTrashMetadata(context);
+            remaining.remove(item);
+            return saveTrashMetadata(context, remaining);
+        } catch (IOException | RuntimeException failure) {
+            FLog.w(TAG, "워치 휴지통 파일을 복원하지 못했습니다.", failure);
+            return false;
+        }
     }
 
     /**
@@ -825,8 +961,8 @@ public class TrashManager {
                 continue;
             }
 
-            File fileInTrash = new File(trashDir, item.getTrashFileName());
-            if (!fileInTrash.exists()) {
+            File fileInTrash = resolveTrashFile(trashDir, item.getTrashFileName());
+            if (fileInTrash == null || !fileInTrash.isFile() || !isBasename(item.getOriginalDisplayName())) {
                 FLog.w(TAG, "복원할 휴지통 파일을 확인하지 못했습니다.");
                 allSucceeded = false;
                 continue;
@@ -988,7 +1124,7 @@ public class TrashManager {
                 // Public Downloads/FadCam/ folder
                 File publicDownloadsDir = Environment
                         .getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-                return new File(publicDownloadsDir, Constants.RECORDING_DIRECTORY);
+                return safeChild(publicDownloadsDir, Constants.RECORDING_DIRECTORY);
 
             case INTERNAL_STORAGE:
                 // App's private external files directory
@@ -997,7 +1133,7 @@ public class TrashManager {
                     FLog.e(TAG, "getRestoreTargetDirectory: External files directory is null");
                     return null;
                 }
-                return new File(externalFilesDir, Constants.RECORDING_DIRECTORY);
+                return safeChild(externalFilesDir, Constants.RECORDING_DIRECTORY);
 
             case SAF_STORAGE:
                 // SAF restore is handled by restoreItemsToSaf() and should not reach here.
@@ -1016,16 +1152,9 @@ public class TrashManager {
      * getUniqueTrashFileName.
      */
     private static String getUniqueFileNameInDirectory(File directory, String originalName) {
-        if (!directory.exists() && !directory.mkdirs()) {
-            FLog.w(TAG, "getUniqueFileNameInDirectory: Target directory doesn't exist and couldn't be created: "
-                    + directory.getAbsolutePath());
-            // Fallback to original name, hoping for the best or that caller handles it
-            return originalName;
-        }
-        File file = new File(directory, originalName);
-        if (!file.exists()) {
-            return originalName;
-        }
+        if (!isBasename(originalName) || !directory.isDirectory()) return null;
+        File file = safeChild(directory, originalName);
+        if (file != null && !file.exists()) return originalName;
 
         String namePart = originalName;
         String extPart = "";
@@ -1035,15 +1164,12 @@ public class TrashManager {
             extPart = originalName.substring(dotIndex);
         }
 
-        int count = 1;
-        while (true) {
+        for (int count = 1; count <= 1000; count++) {
             String newName = namePart + " (" + count + ")" + extPart;
-            file = new File(directory, newName);
-            if (!file.exists()) {
-                return newName;
-            }
-            count++;
+            file = safeChild(directory, newName);
+            if (file != null && !file.exists()) return newName;
         }
+        return null;
     }
 
     /**
@@ -1130,7 +1256,8 @@ public class TrashManager {
         int successfullyDeletedCount = 0;
 
         for (TrashItem item : new ArrayList<>(itemsToDelete)) { // Iterate over a copy of itemsToDelete
-            File fileToDelete = new File(trashDir, item.getTrashFileName());
+            File fileToDelete = item == null ? null : resolveTrashFile(trashDir, item.getTrashFileName());
+            if (fileToDelete == null || (fileToDelete.exists() && !fileToDelete.isFile())) continue;
             boolean fileExistedAndDeleted = false; // Track if physical file was handled
             boolean metadataRemoved = false;
 

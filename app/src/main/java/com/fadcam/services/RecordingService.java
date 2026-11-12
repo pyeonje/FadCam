@@ -128,7 +128,7 @@ public class RecordingService extends Service {
     private long lastStartAttemptTime = 0;
     private static final long MIN_START_INTERVAL_MS = 2000; // 2 seconds minimum between starts
 
-    private CameraDevice cameraDevice;
+    private volatile CameraDevice cameraDevice;
     private CameraCaptureSession captureSession;
     private CaptureRequest.Builder captureRequestBuilder;
     private CameraCharacteristics currentCameraCharacteristics;
@@ -238,8 +238,9 @@ public class RecordingService extends Service {
 
     public static boolean isCameraCleanupInProgress() {
         RecordingService service = liveInstance;
-        return service != null && (service.isStopping || service.isCameraResourceReleasing
-                || service.previewOnlyStopping || service.serviceStopRequested);
+        return cameraShutdownOwner.get() != null || (service != null
+                && (service.isStopping || isCameraResourceReleasing
+                || service.previewOnlyStopping || service.serviceStopRequested));
     }
 
     /** Recording teardown includes codec/muxer finalization after NONE is broadcast. */
@@ -256,8 +257,26 @@ public class RecordingService extends Service {
     private volatile boolean previewOnlyActive = false;
     private volatile boolean previewOnlyStopping = false;
     private volatile boolean serviceStopRequested = false;
-    private final java.util.concurrent.ConcurrentHashMap<CameraDevice, java.util.concurrent.CountDownLatch>
-            closingCameraSignals = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Object cameraCloseLock = new Object();
+    private final java.util.concurrent.atomic.AtomicLong cameraOpenGeneration = new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicReference<RecordingService> cameraShutdownOwner =
+            new java.util.concurrent.atomic.AtomicReference<>();
+    private volatile CameraClose pendingCameraClose;
+    private volatile boolean cameraGlShutdownPending;
+    private volatile boolean destroyed;
+    @Nullable private Runnable startAfterPreviewShutdown;
+
+    private static final class CameraClose {
+        final CameraDevice device;
+        final java.util.concurrent.CompletableFuture<Void> acknowledged = new java.util.concurrent.CompletableFuture<>();
+        boolean reopenQueued;
+        CameraClose(CameraDevice device) { this.device = device; }
+    }
+
+    private boolean anotherCameraShutdownIsPending() {
+        RecordingService owner = cameraShutdownOwner.get();
+        return owner != null && owner != this;
+    }
     private boolean pendingPreviewOnlyStart = false;
     private volatile boolean previewSessionConfigInFlight = false;
     // Camera-open and preview-surface callbacks can both observe STARTING
@@ -1651,6 +1670,7 @@ public class RecordingService extends Service {
             return START_STICKY;
         }
         if (Constants.INTENT_ACTION_START_PREVIEW_ONLY.equals(action)) {
+            if (cameraGlShutdownPending || anotherCameraShutdownIsPending()) return START_STICKY;
             CameraType selectedType = sharedPreferencesManager.getCameraSelection();
             if (selectedType != null && selectedType.isDual()) {
                 FLog.w(TAG, "Preview-only mode is not supported for Dual PiP");
@@ -1690,7 +1710,8 @@ public class RecordingService extends Service {
             boolean wasPreviewOnlyActive = previewOnlyActive;
             pendingPreviewOnlyStart = false;
             stopPreviewOnlyMode();
-            if (!wasPreviewOnlyActive) {
+            startAfterPreviewShutdown = null;
+            if (!wasPreviewOnlyActive && !previewOnlyStopping) {
                 // Idempotent stop: still notify UI to reconcile any stale local state.
                 broadcastOnPreviewOnlyStopped();
                 if (!isWorkingInProgress() && !isStopping && !isCameraResourceReleasing) {
@@ -1700,17 +1721,18 @@ public class RecordingService extends Service {
             }
             return START_STICKY;
         } else if (Constants.INTENT_ACTION_START_RECORDING.equals(action)) {
-            if (isStopping || isCameraResourceReleasing || previewOnlyStopping || serviceStopRequested) {
+            if (isStopping || isCameraResourceReleasing || previewOnlyStopping || serviceStopRequested
+                    || cameraGlShutdownPending || anotherCameraShutdownIsPending()) {
                 broadcastOnRecordingStateCallback();
                 return START_STICKY;
             }
             pendingPreviewOnlyStart = false;
             if (previewOnlyActive) {
                 FLog.d(TAG, "Transitioning from preview-only to recording mode");
-                previewOnlyActive = false;
-                previewSessionConfigInFlight = false;
-                releasePreviewOnlyGlPipeline();
-                broadcastOnPreviewOnlyStopped();
+                Intent retry = new Intent(intent);
+                startAfterPreviewShutdown = () -> onStartCommand(retry, flags, startId);
+                stopPreviewOnlyMode();
+                return START_STICKY;
             }
 
             // Initialize extended sensor providers only when recording actually starts
@@ -1900,6 +1922,10 @@ public class RecordingService extends Service {
             }
         } else if (Constants.INTENT_ACTION_STOP_RECORDING.equals(action)) {
             FLog.i(TAG, "dispatch stop_action_received via onStartCommand");
+            if (previewOnlyStopping && recordingState == RecordingState.NONE) {
+                startAfterPreviewShutdown = null;
+                return START_STICKY;
+            }
             stopRecording();
             return START_STICKY;
         } else if (Constants.INTENT_ACTION_PAUSE_RECORDING.equals(action)) {
@@ -2164,45 +2190,85 @@ public class RecordingService extends Service {
         }
     }
 
+    private static final class PhotoCaptureContext {
+        final GLRecordingPipeline pipeline;
+        final long cameraEpoch;
+        final boolean previewOnly;
+        @Nullable final Size resolution;
+        final String orientation;
+        final PhotoStorageHelper.SaveRequest storage;
+
+        PhotoCaptureContext(GLRecordingPipeline pipeline, long cameraEpoch, boolean previewOnly,
+                @Nullable Size resolution, String orientation, PhotoStorageHelper.SaveRequest storage) {
+            this.pipeline = pipeline;
+            this.cameraEpoch = cameraEpoch;
+            this.previewOnly = previewOnly;
+            this.resolution = resolution;
+            this.orientation = orientation;
+            this.storage = storage;
+        }
+    }
+
     private void capturePhotoFromRecording() {
-        if (recordingState == RecordingState.PAUSED) {
+        final long shutterTime = System.currentTimeMillis();
+        final long shutterEpoch = cameraOpenGeneration.get();
+        final GLRecordingPipeline pipeline = glRecordingPipeline;
+        final RecordingState shutterState = recordingState;
+        if (shutterState == RecordingState.PAUSED) {
             mainHandler.post(() -> Toast.makeText(getApplicationContext(),
                     R.string.photo_capture_paused, Toast.LENGTH_SHORT).show());
             return;
         }
-        boolean canCaptureFromSession =
-                recordingState == RecordingState.IN_PROGRESS
-                        || (previewOnlyActive && recordingState == RecordingState.NONE);
-        if (glRecordingPipeline == null || !canCaptureFromSession) {
+        final boolean previewAtShutter = previewOnlyActive && shutterState == RecordingState.NONE;
+        if (pipeline == null || isStopping || (!previewAtShutter && shutterState != RecordingState.IN_PROGRESS)) {
             mainHandler.post(() -> Toast.makeText(getApplicationContext(),
                     R.string.photo_capture_preview_unavailable, Toast.LENGTH_SHORT).show());
             return;
         }
-        glRecordingPipeline.capturePhotoFrame(bitmap -> {
+        CameraType camera = sharedPreferencesManager != null
+                ? sharedPreferencesManager.getCameraSelection() : CameraType.BACK;
+        PhotoStorageHelper.ShotSource source = camera == CameraType.FRONT
+                ? PhotoStorageHelper.ShotSource.SELFIE : PhotoStorageHelper.ShotSource.BACK;
+        final PhotoCaptureContext shot;
+        try {
+            shot = new PhotoCaptureContext(pipeline, shutterEpoch, previewAtShutter,
+                    sharedPreferencesManager != null ? sharedPreferencesManager.getCameraResolution() : null,
+                    sharedPreferencesManager != null ? sharedPreferencesManager.getVideoOrientation()
+                            : SharedPreferencesManager.ORIENTATION_PORTRAIT,
+                    PhotoStorageHelper.snapshotSaveRequest(getApplicationContext(), source, true,
+                            buildPhotoWatermarkExtras(), shutterTime));
+        } catch (RuntimeException error) {
+            FLog.w(TAG, "Cannot snapshot photo capture settings", error);
+            notifyPhotoSaveFailure();
+            return;
+        }
+        shot.pipeline.capturePhotoFrame(bitmap -> {
             if (bitmap == null) { notifyPhotoSaveFailure(); return; }
+            RecordingState currentState = recordingState;
+            boolean matchingMode = shot.previewOnly
+                    ? previewOnlyActive && currentState == RecordingState.NONE
+                    : currentState == RecordingState.IN_PROGRESS;
+            if (shot.pipeline != glRecordingPipeline || shot.cameraEpoch != cameraOpenGeneration.get()
+                    || isStopping || !matchingMode) {
+                if (!bitmap.isRecycled()) bitmap.recycle();
+                notifyPhotoSaveFailure();
+                return;
+            }
+            // The renderer delivered an accepted frame from this shot. Later switches must not
+            // relabel or crop it using a new session; PhotoSaveDispatch owns the original bitmap.
             com.fadcam.utils.PhotoSaveDispatch.post(backgroundHandler, bitmap, () -> {
-                CameraType selected = sharedPreferencesManager != null
-                        ? sharedPreferencesManager.getCameraSelection()
-                        : CameraType.BACK;
-                PhotoStorageHelper.ShotSource shotSource = selected == CameraType.FRONT
-                        ? PhotoStorageHelper.ShotSource.SELFIE
-                        : PhotoStorageHelper.ShotSource.BACK;
                 Bitmap bitmapForSave = bitmap;
                 try {
-                    if (previewOnlyActive && recordingState == RecordingState.NONE) {
-                        Bitmap normalized = normalizePreviewOnlyShotBitmap(bitmapForSave);
-                        if (normalized != null && normalized != bitmapForSave) {
-                            bitmapForSave.recycle();
-                            bitmapForSave = normalized;
-                        }
+                    if (shot.previewOnly) {
+                        Bitmap normalized = normalizePreviewOnlyShotBitmap(bitmapForSave, shot.resolution, shot.orientation);
+                        if (normalized != null) bitmapForSave = normalized;
                         Bitmap cropped = cropVerticalLetterbox(bitmapForSave);
                         if (cropped != null && cropped != bitmapForSave) {
-                            bitmapForSave.recycle();
+                            if (bitmapForSave != bitmap) bitmapForSave.recycle();
                             bitmapForSave = cropped;
                         }
                     }
-                    Uri savedUri = PhotoStorageHelper.saveJpegBitmap(getApplicationContext(), bitmapForSave,
-                            true, shotSource, buildPhotoWatermarkExtras());
+                    Uri savedUri = PhotoStorageHelper.saveJpegBitmap(getApplicationContext(), bitmapForSave, shot.storage);
                     if (savedUri == null) { notifyPhotoSaveFailure(); return; }
                     Intent updateIntent = new Intent(Constants.ACTION_RECORDING_COMPLETE);
                     updateIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, true);
@@ -2211,7 +2277,7 @@ public class RecordingService extends Service {
                     mainHandler.post(() -> Toast.makeText(getApplicationContext(),
                             R.string.photo_capture_saved, Toast.LENGTH_SHORT).show());
                 } finally {
-                    if (!bitmapForSave.isRecycled()) bitmapForSave.recycle();
+                    if (bitmapForSave != bitmap && !bitmapForSave.isRecycled()) bitmapForSave.recycle();
                 }
             }, this::notifyPhotoSaveFailure);
         });
@@ -2224,16 +2290,13 @@ public class RecordingService extends Service {
 
 
     @Nullable
-    private Bitmap normalizePreviewOnlyShotBitmap(@NonNull Bitmap source) {
+    private Bitmap normalizePreviewOnlyShotBitmap(@NonNull Bitmap source, @Nullable Size target,
+            @NonNull String orientation) {
+        Bitmap scaled = source;
+        Bitmap output = source;
         try {
-            Size target = sharedPreferencesManager != null
-                    ? sharedPreferencesManager.getCameraResolution()
-                    : null;
             int targetW = target != null ? target.getWidth() : 1080;
             int targetH = target != null ? target.getHeight() : 1920;
-            String orientation = sharedPreferencesManager != null
-                    ? sharedPreferencesManager.getVideoOrientation()
-                    : SharedPreferencesManager.ORIENTATION_PORTRAIT;
             boolean portrait = SharedPreferencesManager.ORIENTATION_PORTRAIT.equalsIgnoreCase(orientation);
             if (portrait && targetW > targetH) {
                 int tmp = targetW;
@@ -2252,21 +2315,20 @@ public class RecordingService extends Service {
             float scale = Math.max(targetW / (float) srcW, targetH / (float) srcH);
             int scaledW = Math.max(1, Math.round(srcW * scale));
             int scaledH = Math.max(1, Math.round(srcH * scale));
-            Bitmap scaled = (scaledW == srcW && scaledH == srcH)
+            scaled = (scaledW == srcW && scaledH == srcH)
                     ? source
                     : Bitmap.createScaledBitmap(source, scaledW, scaledH, true);
             int x = Math.max(0, (scaledW - targetW) / 2);
             int y = Math.max(0, (scaledH - targetH) / 2);
             int cropW = Math.min(targetW, scaledW);
             int cropH = Math.min(targetH, scaledH);
-            Bitmap out = Bitmap.createBitmap(scaled, x, y, cropW, cropH);
-            if (scaled != source && scaled != out) {
-                scaled.recycle();
-            }
-            return out;
+            output = Bitmap.createBitmap(scaled, x, y, cropW, cropH);
+            return output;
         } catch (Exception e) {
             FLog.w(TAG, "normalizePreviewOnlyShotBitmap failed", e);
             return source;
+        } finally {
+            if (scaled != source && scaled != output && !scaled.isRecycled()) scaled.recycle();
         }
     }
 
@@ -2328,6 +2390,8 @@ public class RecordingService extends Service {
     @Override
     public void onDestroy() {
         FLog.d(TAG, "onDestroy: Service being destroyed...");
+        destroyed = true;
+        startAfterPreviewShutdown = null;
         if (liveInstance == this) liveInstance = null;
         recordingHaptics.onRecordingStopped(this);
         // Safety net: drop any in-flight finalization guard (the process is
@@ -2337,9 +2401,6 @@ public class RecordingService extends Service {
 
         // Stop any active reconnection attempts
         stopReconnectionAttempts();
-
-        // Make sure dummy surface is released
-        releaseDummyBackgroundSurface();
 
         // Ensure all location services are properly stopped
         if (geotagHelper != null) {
@@ -2397,16 +2458,9 @@ public class RecordingService extends Service {
         }
 
         // Stop background thread to prevent memory leak
-        if (backgroundThread != null) {
-            try {
-                backgroundThread.quitSafely();
-                backgroundThread.join(1000);
-                FLog.d(TAG, "Background thread stopped successfully.");
-            } catch (InterruptedException e) {
-                FLog.e(TAG, "Error stopping background thread", e);
-                Thread.currentThread().interrupt();
-            }
-        }
+        // Camera2 onClosed is delivered by this HandlerThread. Never shut it down
+        // while a retired device can still own the input Surface.
+        if (!cameraGlShutdownPending && pendingCameraClose == null) quitBackgroundThread();
 
         if (motionDetectorWarmupExecutor != null) {
             try {
@@ -2437,6 +2491,7 @@ public class RecordingService extends Service {
             }
             finalizingTimelineMs = getEffectiveTimelineMs();
             isStopping = true;
+            beginCameraGlShutdown();
             requestedPipeline = glRecordingPipeline;
             // STARTING may have no camera or only a prepared, preview-capable pipeline.
             recordingActuallyStarted = recordingStartTime > 0L;
@@ -2523,32 +2578,11 @@ public class RecordingService extends Service {
         final com.fadcam.opengl.GLRecordingPipeline endingPipeline = requestedPipeline;
         // Use a background thread for resource cleanup to avoid blocking the main
         // thread
-        new Thread(() -> {
-            boolean outputSaved = recordingActuallyStarted && endingPipeline != null;
+        final java.util.concurrent.atomic.AtomicBoolean closeTimedOut = new java.util.concurrent.atomic.AtomicBoolean();
+        Runnable finalizeOutput = () -> {
+            boolean outputSaved = recordingActuallyStarted && endingPipeline != null && !closeTimedOut.get();
             try {
-                // Set camera resources as releasing and broadcast early
-                setCameraResourcesReleasing(true);
-                broadcastOnRecordingStopped();
-
-                // First stop the capture session
-                if (captureSession != null) {
-                    try {
-                        FLog.d(TAG, "Stopping repeating request and closing capture session");
-                        captureSession.stopRepeating();
-                        captureSession.close();
-                    } catch (Exception e) {
-                        FLog.e(TAG, "Error closing capture session", e);
-                    } finally {
-                        captureSession = null;
-                    }
-                }
-
-                // Closing a session is asynchronous. Keep its GL input Surface
-                // alive until the device's actual onClosed callback has arrived.
-                // Releasing that Surface while the telephoto HAL still produces
-                // frames can reset the Samsung camera provider.
-                closeCameraBeforePipelineShutdown();
-                
+                releaseDummyBackgroundSurface();
                 // Stop and release the GL pipeline
                 if (endingPipeline != null) {
                     try {
@@ -2658,8 +2692,9 @@ public class RecordingService extends Service {
                     // started during cleanup.  The GL pipeline finalisation
                     // (audio drain, muxer close) can take >1 s, and the user
                     // may have tapped "record" again in the meantime.
+                    finishCameraGlShutdown();
                     if (recordingState == RecordingState.NONE) {
-                        checkIfServiceCanStop();
+                        if (!destroyed) checkIfServiceCanStop();
                     } else {
                         FLog.d(TAG, "Skipping service stop — new recording started during cleanup (state=" + recordingState + ")");
                     }
@@ -2680,7 +2715,7 @@ public class RecordingService extends Service {
                         recordingCompleteIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, saved);
                         // Note: We don't have the specific URI here, but RecordsFragment will do a full
                         // refresh
-                        sendBroadcast(recordingCompleteIntent);
+                        if (!closeTimedOut.get()) sendBroadcast(recordingCompleteIntent);
                     } catch (Exception e) {
                         FLog.e(TAG, "Error broadcasting recording complete", e);
                     }
@@ -2689,13 +2724,15 @@ public class RecordingService extends Service {
                     removeInFlightFinalization(inFlightUri);
                     if (saved) {
                         finalizeJustStoppedRecording();
-                    } else {
+                    } else if (!closeTimedOut.get()) {
                         Toast.makeText(this, R.string.personal_recording_save_failed, Toast.LENGTH_LONG).show();
                     }
-                });            } catch (Exception e) {
+                });
+            } catch (Exception e) {
                 FLog.e(TAG, "Error in stopRecording cleanup thread", e);
                 removeInFlightFinalization(inFlightUri);
                 mainHandler.post(() -> {
+                    finishCameraGlShutdown();
                     isStopping = false;
                     pendingStartRecording = false;
 
@@ -2704,13 +2741,33 @@ public class RecordingService extends Service {
                     try {
                         Intent recordingCompleteIntent = new Intent(Constants.ACTION_RECORDING_COMPLETE);
                         recordingCompleteIntent.putExtra(Constants.EXTRA_RECORDING_SUCCESS, false);
-                        sendBroadcast(recordingCompleteIntent);
+                        if (!closeTimedOut.get()) sendBroadcast(recordingCompleteIntent);
                         FLog.d(TAG, "Broadcasted ACTION_RECORDING_COMPLETE (error case) for list refresh");
                     } catch (Exception broadcastError) {
                         FLog.e(TAG, "Error broadcasting recording complete on error", broadcastError);
                     }
                 });
             }
+        };
+        new Thread(() -> {
+            setCameraResourcesReleasing(true);
+            broadcastOnRecordingStopped();
+            closeCurrentCaptureSession();
+            CameraClose close = retireCurrentCamera();
+            if (close != null && !awaitCameraAcknowledgement(close)) {
+                closeTimedOut.set(true);
+                mainHandler.post(() -> {
+                    Intent failed = new Intent(Constants.ACTION_RECORDING_COMPLETE);
+                    failed.putExtra(Constants.EXTRA_RECORDING_SUCCESS, false);
+                    sendBroadcast(failed);
+                    Toast.makeText(this, R.string.personal_recording_save_failed, Toast.LENGTH_LONG).show();
+                });
+                // No waiting thread or new camera session while the one pending owner
+                // holds HAL surfaces. A late acknowledgement can still salvage the file.
+                close.acknowledged.thenRun(() -> new Thread(finalizeOutput, "RecordingLateClose").start());
+                return;
+            }
+            finalizeOutput.run();
         }, "RecordingStopThread").start();
     }
 
@@ -2735,9 +2792,8 @@ public class RecordingService extends Service {
         // The GL pipeline stays alive (paused) so recording can resume instantly.
         if (!motionLabEnabledForSession && !isSwitchingCamera) {
             FLog.d(TAG, "Releasing camera during pause (motion detection disabled)");
-            releaseDummyBackgroundSurface();
-            releaseMotionAnalysisReader();
             closeCameraResourcesForSwitch();
+            releasePausedAuxiliarySurfaces();
         }
 
         // Pause noise monitor and sensors — no audio recorded, no watermark data needed
@@ -2952,25 +3008,8 @@ public class RecordingService extends Service {
                 .apply();
 
             previewSessionConfigInFlight = false;
-            if (captureSession != null) {
-                try {
-                    captureSession.stopRepeating();
-                } catch (Exception ignored) {
-                }
-                try {
-                    captureSession.close();
-                } catch (Exception ignored) {
-                }
-                captureSession = null;
-            }
-            if (cameraDevice != null) {
-                try {
-                    cameraDevice.close();
-                } catch (Exception ignored) {
-                }
-                cameraDevice = null;
-            }
-            isCameraOpen = false;
+            closeCurrentCaptureSession();
+            retireCurrentCamera();
             if (glRecordingPipeline != null && previewSurface != null && previewSurface.isValid()) {
                 glRecordingPipeline.setPreviewSurfaceImmediate(previewSurface);
             }
@@ -3024,31 +3063,25 @@ public class RecordingService extends Service {
      * Must be called during a pause state to avoid frame loss.
      */
     private void closeCameraResourcesForSwitch() {
-        try {
-            // Close the capture session
-            if (captureSession != null) {
-                try {
-                    captureSession.close();
-                } catch (Exception e) {
-                    FLog.w(TAG, "Error closing capture session", e);
-                }
-                captureSession = null;
-            }
+        closeCurrentCaptureSession();
+        retireCurrentCamera();
+    }
 
-            // Close the camera device
-            if (cameraDevice != null) {
-                try {
-                    cameraDevice.close();
-                } catch (Exception e) {
-                    FLog.w(TAG, "Error closing camera device", e);
-                }
-                cameraDevice = null;
-            }
-
-            isCameraOpen = false;
-        } catch (Exception e) {
-            FLog.e(TAG, "Unexpected error closing camera resources", e);
-        }
+    private void releasePausedAuxiliarySurfaces() {
+        CameraClose close = pendingCameraClose;
+        // Snapshot only the old dummy Surface so a delayed callback cannot affect a new session.
+        final Surface retiredSurface = dummyBackgroundSurface;
+        final SurfaceTexture retiredTexture = dummySurfaceTexture;
+        dummyBackgroundSurface = null;
+        dummySurfaceTexture = null;
+        Runnable release = () -> {
+            if (retiredSurface != null) retiredSurface.release();
+            if (retiredTexture != null) retiredTexture.release();
+        };
+        if (close == null) release.run();
+        else close.acknowledged.thenRun(release);
+        // Motion Lab is disabled for personal capture; its reader has its own lifecycle.
+        releaseMotionAnalysisReader();
     }
 
     /**
@@ -3087,58 +3120,43 @@ public class RecordingService extends Service {
     }
 
     private void releaseRecordingResources() {
-        if (isStopping)
-            return;
-
-        // Release dummy background surface first
-        releaseDummyBackgroundSurface();
-        releaseMotionAnalysisReader();
-
+        if (isStopping || cameraGlShutdownPending) return;
         isStopping = true;
-        try {
-            if (captureSession != null) {
-                captureSession.close();
-            }
-        } catch (Exception e) {
-        } finally {
-            captureSession = null;
+        beginCameraGlShutdown();
+        final GLRecordingPipeline endingPipeline = glRecordingPipeline;
+        closeCurrentCaptureSession();
+        CameraClose close = retireCurrentCamera();
+        if (close == null && endingPipeline == null && safRecordingPfd == null
+                && currentSegmentParcelFileDescriptor == null) {
+            releaseDummyBackgroundSurface();
+            recordingState = RecordingState.NONE;
+            if (sharedPreferencesManager != null) sharedPreferencesManager.setRecordingInProgress(false);
+            finishCameraGlShutdown();
+            return;
         }
-        try {
-            if (cameraDevice != null) {
-                cameraDevice.close();
-            }
-        } catch (Exception e) {
-        } finally {
-            cameraDevice = null;
-        }
-        if (glRecordingPipeline != null) {
-            glRecordingPipeline.stopRecording();
-            glRecordingPipeline = null;
-        }
-        // -----
-        if (safRecordingPfd != null) {
+        runAfterCameraAcknowledgement(close, () -> {
             try {
-                safRecordingPfd.close();
-                // log removed
-            } catch (Exception e) {
-                FLog.e(TAG, "Error closing SAF ParcelFileDescriptor (resource cleanup)", e);
+                releaseDummyBackgroundSurface();
+                if (endingPipeline != null) endingPipeline.stopRecording();
+            } catch (RuntimeException error) {
+                FLog.e(TAG, "Error releasing recording pipeline", error);
+            } finally {
+                if (glRecordingPipeline == endingPipeline) glRecordingPipeline = null;
+                closeQuietly(safRecordingPfd);
+                safRecordingPfd = null;
+                closeQuietly(currentSegmentParcelFileDescriptor);
+                currentSegmentParcelFileDescriptor = null;
+                recordingState = RecordingState.NONE;
+                if (sharedPreferencesManager != null) sharedPreferencesManager.setRecordingInProgress(false);
+                finishCameraGlShutdown();
             }
-            safRecordingPfd = null;
-        }
-        
-        // ⚠️ CRITICAL: Close segment PFD for video splitting (SAF mode)
-        if (currentSegmentParcelFileDescriptor != null) {
-            try {
-                currentSegmentParcelFileDescriptor.close();
-                FLog.d(TAG, "Closed current segment ParcelFileDescriptor (resource cleanup)");
-            } catch (Exception e) {
-                FLog.e(TAG, "Error closing segment PFD (resource cleanup)", e);
-            }
-            currentSegmentParcelFileDescriptor = null;
-        }
-        // -----
-        recordingState = RecordingState.NONE;
-        sharedPreferencesManager.setRecordingInProgress(false);
+        });
+    }
+
+    private void closeQuietly(@Nullable ParcelFileDescriptor descriptor) {
+        if (descriptor == null) return;
+        try { descriptor.close(); }
+        catch (java.io.IOException error) { FLog.w(TAG, "Error closing recording descriptor", error); }
     }
 
     private void configureMotionLabForSession() {
@@ -4061,6 +4079,8 @@ public class RecordingService extends Service {
     }
 
     private void openCamera() {
+        if (destroyed || isStopping || cameraGlShutdownPending || anotherCameraShutdownIsPending()) return;
+        if (deferCameraOpenIfRetiring(this::openCamera)) return;
         if (cameraManager == null) {
             FLog.e(TAG, "openCamera: CameraManager (class field) is null.");
             if (recordingState == RecordingState.STARTING)
@@ -4121,13 +4141,9 @@ public class RecordingService extends Service {
             }
 
             if (cameraDevice != null) {
-                FLog.w(TAG, "openCamera: Closing existing cameraDevice instance first.");
-                try {
-                    cameraDevice.close();
-                } catch (Exception e) {
-                    FLog.e(TAG, "Error explicitly closing existing cameraDevice prior to opening new one", e);
-                }
-                cameraDevice = null;
+                closeCurrentCaptureSession();
+                retireCurrentCamera();
+                if (deferCameraOpenIfRetiring(this::openCamera)) return;
             }
 
             final int MAX_RETRIES = 3;
@@ -4143,7 +4159,7 @@ public class RecordingService extends Service {
 
             while (attempt < MAX_RETRIES) {
                 try {
-                    cameraManager.openCamera(finalCameraToOpenId, cameraStateCallback, backgroundHandler);
+                    cameraManager.openCamera(finalCameraToOpenId, callbackForCameraGeneration(), backgroundHandler);
                     return;
                 } catch (CameraAccessException e) {
                     FLog.e(TAG, "openCamera: Camera Access Exception on attempt " + (attempt + 1) + " for ID "
@@ -4310,17 +4326,14 @@ public class RecordingService extends Service {
 
         @Override
         public void onDisconnected(@NonNull CameraDevice camera) {
+            if (camera != cameraDevice) return;
             FLog.d(TAG, "Camera device disconnected");
 
             // Store camera state before closing
             boolean wasRecording = (recordingState == RecordingState.IN_PROGRESS);
 
-            // Close camera device
-            if (cameraDevice != null) {
-                cameraDevice.close();
-                cameraDevice = null;
-            }
-            isCameraOpen = false;
+            closeCurrentCaptureSession();
+            retireCurrentCamera();
 
             // Reset the pending flag if camera disconnected
             if (pendingStartRecording) {
@@ -4363,15 +4376,17 @@ public class RecordingService extends Service {
 
         @Override
         public void onError(@NonNull CameraDevice camera, int error) {
+            if (cameraDevice != null && camera != cameraDevice) return;
+            CameraClose closing = pendingCameraClose;
+            if (closing != null && closing.device == camera) return;
             FLog.e(TAG, "Camera device error: " + error);
 
             // Store camera state before closing
             boolean wasRecording = (recordingState == RecordingState.IN_PROGRESS);
 
-            if (cameraDevice != null) {
-                cameraDevice.close();
-                cameraDevice = null;
-            }
+            closeCurrentCaptureSession();
+            if (camera == cameraDevice) retireCurrentCamera();
+            else camera.close(); // Opening failed before any capture session was attached.
             isCameraOpen = false;
 
             // Reset the pending flag if camera error
@@ -4444,22 +4459,20 @@ public class RecordingService extends Service {
 
         @Override
         public void onClosed(@NonNull CameraDevice camera) {
-            java.util.concurrent.CountDownLatch signal = closingCameraSignals.remove(camera);
-            if (signal != null) signal.countDown();
-            isCameraOpen = false;
-
-            // If we were in segment rollover, continue with the rollover process
-            if (isRolloverClosingOldSession) {
-                FLog.d(TAG, "Camera closed during segment rollover, proceeding with rollover");
-                isRolloverClosingOldSession = false;
-                proceedWithRolloverAfterOldSessionClosed();
+            CameraClose completed = null;
+            synchronized (cameraCloseLock) {
+                CameraClose retiring = pendingCameraClose;
+                if (retiring != null && retiring.device == camera) {
+                    pendingCameraClose = null;
+                    completed = retiring;
+                } else if (cameraDevice == camera) {
+                    cameraDevice = null;
+                    isCameraOpen = false;
+                    pendingStartRecording = false;
+                    cameraOpenGeneration.incrementAndGet();
+                }
             }
-
-            // Reset the pending flag if camera closed
-            if (pendingStartRecording) {
-                FLog.w(TAG, "Camera closed while pendingStartRecording=true, resetting flag");
-                pendingStartRecording = false;
-            }
+            if (completed != null) completed.acknowledged.complete(null);
         }
     };
 
@@ -4787,20 +4800,24 @@ public class RecordingService extends Service {
         }
     }
 
+    private boolean admitConfiguredCaptureSession(@NonNull CameraCaptureSession session) {
+        synchronized (cameraCloseLock) {
+            if (destroyed || isStopping || previewOnlyStopping || cameraGlShutdownPending || cameraDevice == null
+                    || session.getDevice() != cameraDevice
+                    || (recordingState == RecordingState.NONE && !previewOnlyActive)) return false;
+            previewSessionConfigInFlight = false;
+            captureSession = session;
+            return true;
+        }
+    }
+
     private final CameraCaptureSession.StateCallback captureSessionCallback = new CameraCaptureSession.StateCallback() {
         @Override
         public void onConfigured(@NonNull CameraCaptureSession session) {
-            if (previewOnlyStopping || session.getDevice() != cameraDevice) {
+            if (!admitConfiguredCaptureSession(session)) {
                 session.close();
                 return;
             }
-            previewSessionConfigInFlight = false;
-            if (isStopping || cameraDevice == null || (recordingState == RecordingState.NONE && !previewOnlyActive)) {
-                FLog.w(TAG,
-                        "onConfigured: Service is stopping, camera device is null, or recording state is NONE. Aborting.");
-                return;
-            }
-            captureSession = session;
             try {
                 // Set auto control mode
                 captureRequestBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
@@ -4818,7 +4835,7 @@ public class RecordingService extends Service {
                 captureRequestBuilder.set(CaptureRequest.FLASH_MODE,
                         isRecordingTorchEnabled ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
                 // Defensive: check session state before using
-                if (captureSession == null || cameraDevice == null
+                if (isStopping || captureSession != session || session.getDevice() != cameraDevice
                         || (recordingState == RecordingState.NONE && !previewOnlyActive)) {
                     FLog.w(TAG,
                             "onConfigured: Session or cameraDevice became null before setRepeatingRequest. Aborting.");
@@ -4839,6 +4856,7 @@ public class RecordingService extends Service {
                 }
                 // Start the GL pipeline only after session is configured and repeating request
                 // is set
+                if (isStopping || captureSession != session || session.getDevice() != cameraDevice) return;
                 if (glRecordingPipeline != null && !previewOnlyActive) {
                     glRecordingPipeline.startRecording();
                 }
@@ -4870,14 +4888,13 @@ public class RecordingService extends Service {
 
         @Override
         public void onClosed(@NonNull CameraCaptureSession session) {
-            previewSessionConfigInFlight = false;
-            if (isStopping)
-                return;
-            FLog.d(TAG, "Capture session closed");
-
-            if (session == captureSession) {
+            synchronized (cameraCloseLock) {
+                if (session != captureSession) return;
                 captureSession = null;
+                previewSessionConfigInFlight = false;
             }
+            if (isStopping) return;
+            FLog.d(TAG, "Capture session closed");
 
             if (isRolloverClosingOldSession) {
                 FLog.d(TAG, "Capture session closed as part of rollover");
@@ -4894,14 +4911,13 @@ public class RecordingService extends Service {
 
         @Override
         public void onConfigured(@NonNull CameraCaptureSession session) {
-            if (isStopping || cameraDevice == null) {
-                FLog.e(TAG, "onConfigured: Service is stopping or camera closed before high-speed session configured");
+            if (!admitConfiguredCaptureSession(session)) {
+                session.close();
                 return;
             }
 
             try {
                 FLog.d(TAG, "High-speed session configured successfully");
-                captureSession = session;
 
                 // For high-speed sessions, we need to create a list of requests for burst
                 CameraConstrainedHighSpeedCaptureSession highSpeedSession = (CameraConstrainedHighSpeedCaptureSession) session;
@@ -4910,6 +4926,7 @@ public class RecordingService extends Service {
                         .createHighSpeedRequestList(captureRequestBuilder.build());
 
                 // Start repeating burst for high-speed recording
+                if (isStopping || captureSession != session || session.getDevice() != cameraDevice) return;
                 highSpeedSession.setRepeatingBurst(highSpeedRequests, null, backgroundHandler);
                 maybeApplyDeferredAeLockAfterSessionStart("high-speed");
 
@@ -4926,8 +4943,7 @@ public class RecordingService extends Service {
 
         @Override
         public void onConfigureFailed(@NonNull CameraCaptureSession session) {
-            if (isStopping)
-                return;
+            if (isStopping || cameraDevice == null || session.getDevice() != cameraDevice) return;
             FLog.e(TAG, "High-speed session configuration failed");
 
             try {
@@ -6847,55 +6863,144 @@ public class RecordingService extends Service {
 
     private void stopPreviewOnlyMode() {
         pendingPreviewOnlyStart = false;
-        if (!previewOnlyActive) {
-            return;
-        }
+        if (!previewOnlyActive || previewOnlyStopping) return;
         previewOnlyActive = false;
         previewOnlyStopping = true;
         previewSessionConfigInFlight = false;
-        try {
-            if (captureSession != null) {
-                try {
-                    captureSession.stopRepeating();
-                } catch (Exception ignore) {
-                }
-                captureSession.close();
-                captureSession = null;
-            }
-            if (cameraDevice != null) {
-                cameraDevice.close();
-                cameraDevice = null;
-            }
-            isCameraOpen = false;
-        } catch (Exception e) {
-            FLog.w(TAG, "Failed while stopping preview-only mode", e);
+        releasePreviewOnlyGlPipeline(() -> {
+            previewOnlyStopping = false;
+            broadcastOnPreviewOnlyStopped();
+            Runnable continuation = startAfterPreviewShutdown;
+            startAfterPreviewShutdown = null;
+            if (destroyed) return;
+            if (continuation != null) continuation.run();
+            else if (!isWorkingInProgress()) stopSelf();
+        });
+    }
+
+    private void closeCurrentCaptureSession() {
+        CameraCaptureSession ending;
+        synchronized (cameraCloseLock) {
+            ending = captureSession;
+            captureSession = null;
         }
-        releasePreviewOnlyGlPipeline();
-        broadcastOnPreviewOnlyStopped();
-        if (!isWorkingInProgress()) {
-            stopSelf();
+        if (ending == null) return;
+        try { ending.stopRepeating(); } catch (Exception error) {
+            FLog.w(TAG, "Could not stop repeating camera requests", error);
+        }
+        try { ending.close(); } catch (RuntimeException error) {
+            FLog.w(TAG, "Could not close capture session", error);
         }
     }
 
-    /** Called only on the recording cleanup worker, never the UI thread. */
-    private void closeCameraBeforePipelineShutdown() {
-        CameraDevice closing = cameraDevice;
-        if (closing == null) return;
-        java.util.concurrent.CountDownLatch signal = new java.util.concurrent.CountDownLatch(1);
-        closingCameraSignals.put(closing, signal);
-        try {
-            closing.close();
-            if (cameraDevice == closing) cameraDevice = null;
+    @Nullable
+    private CameraClose retireCurrentCamera() {
+        CameraClose closing;
+        synchronized (cameraCloseLock) {
+            if (cameraDevice == null) {
+                if (pendingCameraClose == null) cameraOpenGeneration.incrementAndGet();
+                return pendingCameraClose;
+            }
+            closing = new CameraClose(cameraDevice);
+            pendingCameraClose = closing;
+            cameraDevice = null;
             isCameraOpen = false;
-            if (!signal.await(2, java.util.concurrent.TimeUnit.SECONDS))
-                FLog.w(TAG, "Camera close acknowledgement timed out during recording cleanup");
+            cameraOpenGeneration.incrementAndGet();
+        }
+        try {
+            closing.device.close();
+        } catch (RuntimeException error) {
+            // A close exception is not an acknowledgement. Keep the input quarantined.
+            FLog.w(TAG, "Camera close failed; retaining its input", error);
+        }
+        return closing;
+    }
+
+    private boolean deferCameraOpenIfRetiring(Runnable reopen) {
+        synchronized (cameraCloseLock) {
+            CameraClose closing = pendingCameraClose;
+            if (closing == null) return false;
+            if (!closing.reopenQueued) {
+                closing.reopenQueued = true;
+                long retiringGeneration = cameraOpenGeneration.get();
+                closing.acknowledged.thenRun(() -> mainHandler.post(() -> {
+                    if (cameraOpenGeneration.get() == retiringGeneration
+                            && !destroyed && !isStopping && !cameraGlShutdownPending
+                            && (previewOnlyActive || recordingState != RecordingState.NONE)) reopen.run();
+                }));
+            }
+            return true;
+        }
+    }
+
+    private CameraDevice.StateCallback callbackForCameraGeneration() {
+        final long generation = cameraOpenGeneration.incrementAndGet();
+        return new CameraDevice.StateCallback() {
+            @Override public void onOpened(@NonNull CameraDevice camera) {
+                synchronized (cameraCloseLock) {
+                    if (cameraOpenGeneration.get() == generation && pendingCameraClose == null
+                            && !destroyed && !cameraGlShutdownPending) {
+                        cameraStateCallback.onOpened(camera);
+                        return;
+                    }
+                }
+                camera.close();
+            }
+
+            @Override public void onDisconnected(@NonNull CameraDevice camera) {
+                if (cameraOpenGeneration.get() == generation) cameraStateCallback.onDisconnected(camera);
+            }
+
+            @Override public void onError(@NonNull CameraDevice camera, int error) {
+                if (cameraOpenGeneration.get() == generation) cameraStateCallback.onError(camera, error);
+            }
+
+            @Override public void onClosed(@NonNull CameraDevice camera) {
+                cameraStateCallback.onClosed(camera);
+            }
+        };
+    }
+
+    private boolean awaitCameraAcknowledgement(CameraClose close) {
+        try {
+            close.acknowledged.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            return true;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-        } catch (RuntimeException error) {
-            FLog.w(TAG, "Camera close failed during recording cleanup", error);
-        } finally {
-            closingCameraSignals.remove(closing, signal);
+        } catch (java.util.concurrent.TimeoutException | java.util.concurrent.ExecutionException error) {
+            FLog.w(TAG, "Camera close was not acknowledged; deferring GL cleanup", error);
         }
+        return false;
+    }
+
+    private void runAfterCameraAcknowledgement(@Nullable CameraClose close, Runnable action) {
+        if (close == null || close.acknowledged.isDone()) {
+            new Thread(action, "CameraGlCleanup").start();
+        } else {
+            close.acknowledged.thenRun(() -> new Thread(action, "CameraGlCleanup").start());
+            mainHandler.postDelayed(() -> {
+                if (!close.acknowledged.isDone()) {
+                    FLog.w(TAG, "Camera close is unacknowledged; keeping the old input isolated");
+                }
+            }, 2000L);
+        }
+    }
+
+    private void beginCameraGlShutdown() {
+        cameraGlShutdownPending = true;
+        cameraOpenGeneration.incrementAndGet();
+        cameraShutdownOwner.compareAndSet(null, this);
+    }
+
+    private void finishCameraGlShutdown() {
+        cameraGlShutdownPending = false;
+        cameraShutdownOwner.compareAndSet(this, null);
+        if (destroyed) quitBackgroundThread();
+    }
+
+    private void quitBackgroundThread() {
+        HandlerThread thread = backgroundThread;
+        if (thread != null) thread.quitSafely();
     }
 
     private void ensurePreviewOnlyGlPipeline() {
@@ -6961,22 +7066,39 @@ public class RecordingService extends Service {
     }
 
     private void releasePreviewOnlyGlPipeline() {
-        if (glRecordingPipeline == null) return;
-        try {
-            glRecordingPipeline.stopPreviewOnlyRendering();
-        } catch (Exception e) {
-            FLog.w(TAG, "Error stopping preview-only renderer", e);
+        releasePreviewOnlyGlPipeline(() -> {});
+    }
+
+    private void releasePreviewOnlyGlPipeline(Runnable onComplete) {
+        if (cameraGlShutdownPending) return;
+        beginCameraGlShutdown();
+        GLRecordingPipeline ending = glRecordingPipeline;
+        closeCurrentCaptureSession();
+        CameraClose close = retireCurrentCamera();
+        if (close == null && ending == null) {
+            finishCameraGlShutdown();
+            onComplete.run();
+            return;
         }
-        try {
-            glRecordingPipeline.stopRecording();
-        } catch (Exception e) {
-            FLog.w(TAG, "Error releasing preview-only GL pipeline", e);
-        }
-        glRecordingPipeline = null;
+        runAfterCameraAcknowledgement(close, () -> {
+            try {
+                releaseDummyBackgroundSurface();
+                if (ending != null) {
+                    try { ending.stopPreviewOnlyRendering(); }
+                    finally { ending.stopRecording(); }
+                }
+            } catch (RuntimeException error) {
+                FLog.w(TAG, "Error releasing preview-only GL pipeline", error);
+            } finally {
+                if (glRecordingPipeline == ending) glRecordingPipeline = null;
+                finishCameraGlShutdown();
+                mainHandler.post(onComplete);
+            }
+        });
     }
 
     // Add these fields to RecordingService class
-    private GLRecordingPipeline glRecordingPipeline;
+    private volatile GLRecordingPipeline glRecordingPipeline;
     private WatermarkInfoProvider watermarkInfoProvider;
     private com.fadcam.watermark.WatermarkManager watermarkManager;
     
@@ -7594,10 +7716,12 @@ public class RecordingService extends Service {
      * @param cameraId The ID of the camera to reconnect to
      */
     private void tryReconnectCamera(String cameraId) {
+        if (destroyed || isStopping || cameraGlShutdownPending || anotherCameraShutdownIsPending()) return;
+        if (deferCameraOpenIfRetiring(() -> tryReconnectCamera(cameraId))) return;
         try {
             FLog.d(TAG, "Attempting to reconnect camera: " + cameraId);
             cameraManager.openCamera(com.fadcam.utils.CameraLensCatalog.resolve(cameraManager, cameraId).deviceId,
-                    cameraStateCallback, backgroundHandler);
+                    callbackForCameraGeneration(), backgroundHandler);
         } catch (Exception e) {
             FLog.e(TAG, "Error reconnecting to camera", e);
         }

@@ -76,36 +76,50 @@ public final class PhotoStorageHelper {
             @NonNull ShotSource shotSource,
             @Nullable String extraWatermarkData
     ) {
-        String fileName = buildShotFileName(shotSource);
-        FLog.d(TAG, "saveJpegBitmap: source=" + shotSource + ", fileName=" + fileName
-                + ", applyWatermark=" + applyWatermarkFromPreferences);
+        return saveJpegBitmap(context, bitmap, snapshotSaveRequest(context, shotSource,
+                applyWatermarkFromPreferences, extraWatermarkData, System.currentTimeMillis()));
+    }
 
+    /** Frozen before the render or I/O worker can observe preferences for another shot. */
+    public static final class SaveRequest {
+        final ShotSource source;
+        final String fileName;
+        final String watermarkText;
+        @Nullable final String customTreeUri;
+
+        private SaveRequest(ShotSource source, String fileName, String watermarkText, @Nullable String customTreeUri) {
+            this.source = source;
+            this.fileName = fileName;
+            this.watermarkText = watermarkText;
+            this.customTreeUri = customTreeUri;
+        }
+    }
+
+    public static SaveRequest snapshotSaveRequest(Context context, ShotSource source, boolean watermark,
+            @Nullable String extras, long captureTimeMillis) {
         SharedPreferencesManager prefs = SharedPreferencesManager.getInstance(context);
-        Bitmap prepared = prepareBitmapForSave(context, bitmap, prefs, applyWatermarkFromPreferences, extraWatermarkData);
-        if (prepared == null) {
-            return null;
-        }
-        String customTreeUri = prefs != null ? prefs.getCustomStorageUri() : null;
+        return new SaveRequest(source, buildShotFileName(source, captureTimeMillis),
+                watermark ? buildWatermarkText(prefs, extras, captureTimeMillis) : "",
+                prefs.getCustomStorageUri());
+    }
 
-        Uri result = null;
-        if (customTreeUri != null && !customTreeUri.trim().isEmpty()) {
-            FLog.d(TAG, "saveJpegBitmap: attempting SAF save. treeUri=" + customTreeUri);
-            Uri safUri = saveToSaf(context, customTreeUri, fileName, prepared, shotSource);
-            if (safUri != null) {
-                FLog.d(TAG, "saveJpegBitmap: saved via SAF uri=" + safUri);
-                result = safUri;
-            } else {
-                FLog.w(TAG, "saveJpegBitmap: SAF save failed, falling back to internal.");
+    @Nullable
+    public static Uri saveJpegBitmap(Context context, Bitmap bitmap, SaveRequest request) {
+        Bitmap prepared = bitmap;
+        try {
+            if (!request.watermarkText.isEmpty()) {
+                Bitmap watermarked = applyWatermark(context, bitmap, request.watermarkText);
+                if (watermarked != null) prepared = watermarked;
             }
+            String tree = request.customTreeUri;
+            if (tree != null && !tree.trim().isEmpty()) {
+                Uri saved = saveToSaf(context, tree, request.fileName, prepared, request.source);
+                if (saved != null) return saved;
+            }
+            return saveToInternal(context, request.fileName, prepared, request.source);
+        } finally {
+            if (prepared != bitmap && !prepared.isRecycled()) prepared.recycle();
         }
-        if (result == null) {
-            result = saveToInternal(context, fileName, prepared, shotSource);
-            FLog.d(TAG, "saveJpegBitmap: internal save result uri=" + result);
-        }
-        if (prepared != bitmap && !prepared.isRecycled()) {
-            prepared.recycle();
-        }
-        return result;
     }
 
     @Nullable
@@ -183,11 +197,11 @@ public final class PhotoStorageHelper {
     }
 
     @NonNull
-    private static String buildShotFileName(@NonNull ShotSource shotSource) {
+    private static String buildShotFileName(@NonNull ShotSource shotSource, long captureTimeMillis) {
         return Constants.RECORDING_FILE_PREFIX_FADSHOT
                 + shotSourceLabel(shotSource)
                 + "_"
-                + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date())
+                + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date(captureTimeMillis))
                 + "."
                 + Constants.RECORDING_IMAGE_EXTENSION;
     }
@@ -218,41 +232,7 @@ public final class PhotoStorageHelper {
         }
     }
 
-    @Nullable
-    private static Bitmap prepareBitmapForSave(
-            @NonNull Context context,
-            @NonNull Bitmap source,
-            @Nullable SharedPreferencesManager prefs,
-            boolean applyWatermarkFromPreferences
-    ) {
-        return prepareBitmapForSave(context, source, prefs, applyWatermarkFromPreferences, null);
-    }
-
-    @Nullable
-    private static Bitmap prepareBitmapForSave(
-            @NonNull Context context,
-            @NonNull Bitmap source,
-            @Nullable SharedPreferencesManager prefs,
-            boolean applyWatermarkFromPreferences,
-            @Nullable String extraWatermarkData
-    ) {
-        Bitmap working = source;
-        if (applyWatermarkFromPreferences) {
-            String watermarkText = buildWatermarkText(prefs, extraWatermarkData);
-            if (!watermarkText.isEmpty()) {
-                Bitmap watermarked = applyWatermark(context, working, watermarkText);
-                if (watermarked != null) {
-                    if (working != source && !working.isRecycled()) {
-                        working.recycle();
-                    }
-                    working = watermarked;
-                }
-            }
-        }
-        return working;
-    }
-
-    private static String buildWatermarkText(@Nullable SharedPreferencesManager prefs, @Nullable String extraWatermarkData) {
+    private static String buildWatermarkText(@Nullable SharedPreferencesManager prefs, @Nullable String extraWatermarkData, long captureTimeMillis) {
         if (prefs == null) {
             return "";
         }
@@ -260,13 +240,13 @@ public final class PhotoStorageHelper {
         if ("no_watermark".equals(option)) {
             return "";
         }
-        String timestamp = new SimpleDateFormat("dd/MMM/yyyy hh:mm:ss a", Locale.ENGLISH).format(new Date());
+        String timestamp = new SimpleDateFormat("dd/MMM/yyyy hh:mm:ss a", Locale.ENGLISH).format(new Date(captureTimeMillis));
 
         // Timezone suffix (matching video watermark)
         String timezoneSuffix = "";
         if (prefs.isTimezoneEnabled()) {
             java.util.TimeZone tz = java.util.TimeZone.getDefault();
-            int offsetMs = tz.getOffset(System.currentTimeMillis());
+            int offsetMs = tz.getOffset(captureTimeMillis);
             int totalMinutes = offsetMs / 60000;
             int hours = totalMinutes / 60;
             int minutes = Math.abs(totalMinutes % 60);

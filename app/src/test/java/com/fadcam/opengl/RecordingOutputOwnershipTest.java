@@ -97,7 +97,16 @@ public class RecordingOutputOwnershipTest {
         try {
             assertTrue(writer.isAlive());
             assertTrue(descriptor.valid());
-            ReflectionHelpers.callInstanceMethod(service, "releasePreviewOnlyGlPipeline");
+            java.util.concurrent.CountDownLatch cleanup = new java.util.concurrent.CountDownLatch(1);
+            android.os.Handler completionHandler = mock(android.os.Handler.class);
+            when(completionHandler.post(any(Runnable.class))).thenAnswer(call -> {
+                call.getArgument(0, Runnable.class).run();
+                return true;
+            });
+            ReflectionHelpers.setField(service, "mainHandler", completionHandler);
+            ReflectionHelpers.callInstanceMethod(service, "releasePreviewOnlyGlPipeline",
+                    ReflectionHelpers.ClassParameter.from(Runnable.class, cleanup::countDown));
+            assertTrue("preview cleanup completion", cleanup.await(3, java.util.concurrent.TimeUnit.SECONDS));
             assertFalse(writer.isAlive());
             assertFalse(descriptor.valid());
             assertNull(ReflectionHelpers.getField(service, "glRecordingPipeline"));

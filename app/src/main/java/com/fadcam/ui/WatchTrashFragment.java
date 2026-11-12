@@ -23,7 +23,6 @@ import androidx.fragment.app.Fragment;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import android.net.Uri;
 
 import com.fadcam.Constants;
 import com.fadcam.R;
@@ -150,60 +149,7 @@ public class WatchTrashFragment extends Fragment {
         executor.execute(() -> {
             boolean ok = false;
             try {
-                // Locate the trashed file
-                final File trashDir = TrashManager.getTrashDirectory(requireContext());
-                if (trashDir == null) throw new IllegalStateException("Trash dir unavailable");
-                final File trashFile = new File(trashDir, item.getTrashFileName());
-
-                // Determine original destination from the stored URI string.
-                // For watch-recorded videos (file:// URI), restore to the exact original path.
-                // For anything else (SAF, etc.) fall back to default TrashManager restore.
-                final String originalUri = item.getOriginalUriString();
-                File targetFile = null;
-                if (originalUri != null && originalUri.startsWith("file://")) {
-                    final String path = Uri.parse(originalUri).getPath();
-                    if (path != null) targetFile = new File(path);
-                }
-
-                if (targetFile != null) {
-                    // Ensure parent directory exists
-                    final File parentDir = targetFile.getParentFile();
-                    if (parentDir != null && !parentDir.exists()) parentDir.mkdirs();
-
-                    // Try rename first (atomic move), then byte-copy fallback
-                    if (trashFile.exists()) {
-                        ok = trashFile.renameTo(targetFile);
-                        if (!ok) {
-                            try (java.io.FileInputStream fis = new java.io.FileInputStream(trashFile);
-                                 java.io.FileOutputStream fos = new java.io.FileOutputStream(targetFile)) {
-                                final byte[] buf = new byte[65536];
-                                int len;
-                                while ((len = fis.read(buf)) > 0) fos.write(buf, 0, len);
-                                fos.flush();
-                                ok = trashFile.delete();
-                            }
-                        }
-                    }
-
-                    if (ok) {
-                        // Remove entry from trash metadata
-                        final List<TrashItem> meta = TrashManager.loadTrashMetadata(requireContext());
-                        final java.util.Iterator<TrashItem> it = meta.iterator();
-                        while (it.hasNext()) {
-                            if (it.next().getTrashFileName().equals(item.getTrashFileName())) {
-                                it.remove();
-                                break;
-                            }
-                        }
-                        TrashManager.saveTrashMetadata(requireContext(), meta);
-                    }
-                } else {
-                    // Fallback: use the generic TrashManager restore (goes to Downloads/FadCam)
-                    final List<TrashItem> single = new ArrayList<>();
-                    single.add(item);
-                    ok = TrashManager.restoreItemsFromTrash(requireContext(), single);
-                }
-
+                ok = TrashManager.restoreWatchItem(requireContext(), item);
             } catch (Exception e) {
                 FLog.e(TAG, "restoreItem failed", e);
             }
@@ -212,9 +158,12 @@ public class WatchTrashFragment extends Fragment {
             mainHandler.post(() -> {
                 if (!isAdded()) return;
                 if (finalOk) {
-                    items.remove(position);
-                    adapter.notifyItemRemoved(position);
-                    updateEmptyState();
+                    int current = items.indexOf(item);
+                    if (current >= 0) {
+                        items.remove(current);
+                        adapter.notifyItemRemoved(current);
+                        updateEmptyState();
+                    }
                     Toast.makeText(requireContext(),
                             getString(R.string.trash_restore_success_toast, 1),
                             Toast.LENGTH_SHORT).show();
@@ -355,8 +304,8 @@ public class WatchTrashFragment extends Fragment {
                     android.media.MediaMetadataRetriever retriever = null;
                     try {
                         final File trashDir = TrashManager.getTrashDirectory(requireContext());
-                        if (trashDir != null) {
-                            final File videoFile = new File(trashDir, trashFileName);
+                        final File videoFile = TrashManager.resolveTrashFile(trashDir, trashFileName);
+                        if (videoFile != null) {
                             FLog.d(TAG, "Loading trash thumbnail: " + videoFile.getAbsolutePath());
                             FLog.d(TAG, "File exists: " + videoFile.exists() + ", can read: " + videoFile.canRead());
                             

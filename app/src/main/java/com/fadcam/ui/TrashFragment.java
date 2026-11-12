@@ -469,8 +469,8 @@ public class TrashFragment extends BaseFragment implements TrashAdapter.OnTrashI
                 videos++;
             }
             try {
-                java.io.File file = new java.io.File(trashDir, item.getTrashFileName());
-                if (file.exists()) {
+                java.io.File file = TrashManager.resolveTrashFile(trashDir, item.getTrashFileName());
+                if (file != null && file.isFile()) {
                     totalBytes += file.length();
                 }
             } catch (Exception e) {
@@ -698,8 +698,8 @@ public class TrashFragment extends BaseFragment implements TrashAdapter.OnTrashI
                     if (selectedItem != null) {
                         long itemSize = 0L;
                         if (trashDirectory != null && selectedItem.getTrashFileName() != null) {
-                            File trashedFile = new File(trashDirectory, selectedItem.getTrashFileName());
-                            if (trashedFile.exists()) {
+                            File trashedFile = TrashManager.resolveTrashFile(trashDirectory, selectedItem.getTrashFileName());
+                            if (trashedFile != null && trashedFile.isFile()) {
                                 itemSize = trashedFile.length();
                             }
                         }
@@ -756,9 +756,9 @@ public class TrashFragment extends BaseFragment implements TrashAdapter.OnTrashI
             return;
         }
 
-        File trashedFile = new File(trashDirectory, item.getTrashFileName());
+        File trashedFile = TrashManager.resolveTrashFile(trashDirectory, item.getTrashFileName());
 
-        if (!trashedFile.exists()) {
+        if (trashedFile == null || !trashedFile.isFile()) {
             FLog.e(TAG, "Trashed file does not exist: " + trashedFile.getAbsolutePath());
             Toast.makeText(getContext(), getString(R.string.trash_file_not_found), Toast.LENGTH_SHORT).show();
             return;

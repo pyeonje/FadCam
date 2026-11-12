@@ -321,8 +321,8 @@ public class RecordsDeletionService extends Service {
             if (trash != null) for (com.fadcam.model.TrashItem item : TrashManager.loadTrashMetadata(this)) {
                 if (!snapshot.inFlight.uriString.equals(item.getOriginalUriString())
                         || item.getDateTrashed() < snapshot.inFlightStartedAtMs) continue;
-                File copy = new File(trash, item.getTrashFileName());
-                if (copy.isFile() && copy.length() == item.getSizeBytes()) {
+                File copy = TrashManager.resolveTrashFile(trash, item.getTrashFileName());
+                if (copy != null && copy.isFile() && copy.length() == item.getSizeBytes()) {
                     snapshot.finishRecoveredOperation(copy.length());
                     return;
                 }

@@ -259,8 +259,8 @@ public class TrashAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> 
             if (tvFileSize != null && context != null) {
                 File trashDirectory = TrashManager.getTrashDirectory(context);
                 if (trashDirectory != null && item.getTrashFileName() != null) {
-                    File trashedFile = new File(trashDirectory, item.getTrashFileName());
-                    if (trashedFile.exists()) {
+                    File trashedFile = TrashManager.resolveTrashFile(trashDirectory, item.getTrashFileName());
+                    if (trashedFile != null && trashedFile.isFile()) {
                         tvFileSize.setText(android.text.format.Formatter.formatShortFileSize(context, trashedFile.length()));
                     } else {
                         tvFileSize.setText("—");
@@ -314,8 +314,8 @@ public class TrashAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> 
             if (imageViewThumbnail != null && context != null) {
                 File trashDirectory = TrashManager.getTrashDirectory(context);
                 if (trashDirectory != null && item.getTrashFileName() != null) {
-                    File trashedVideoFile = new File(trashDirectory, item.getTrashFileName());
-                    if (trashedVideoFile.exists()) {
+                    File trashedVideoFile = TrashManager.resolveTrashFile(trashDirectory, item.getTrashFileName());
+                    if (trashedVideoFile != null && trashedVideoFile.isFile()) {
                         Uri videoUri = Uri.fromFile(trashedVideoFile);
                         Glide.with(context)
                             .load(videoUri)
@@ -370,8 +370,8 @@ public class TrashAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> 
                     if (interactionListener != null) {
                         File trashDirectory = TrashManager.getTrashDirectory(context);
                         if (trashDirectory != null && item.getTrashFileName() != null) {
-                            File trashedFile = new File(trashDirectory, item.getTrashFileName());
-                            if (trashedFile.exists()) {
+                            File trashedFile = TrashManager.resolveTrashFile(trashDirectory, item.getTrashFileName());
+                            if (trashedFile != null && trashedFile.isFile()) {
                                 interactionListener.onPlayVideoRequested(item);
                             } else {
                                 Toast.makeText(context, "File not found in trash.", Toast.LENGTH_SHORT).show();

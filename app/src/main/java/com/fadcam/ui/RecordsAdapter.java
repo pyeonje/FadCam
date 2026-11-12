@@ -2282,7 +2282,10 @@ public class RecordsAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                     VideoItem newItem = ((VideoItemEntry) newEntry).item;
                     return oldItem.displayName.equals(newItem.displayName) &&
                             oldItem.size == newItem.size &&
-                            oldItem.lastModified == newItem.lastModified;
+                            oldItem.lastModified == newItem.lastModified &&
+                            oldItem.category == newItem.category && oldItem.mediaType == newItem.mediaType &&
+                            oldItem.shotSubtype == newItem.shotSubtype && oldItem.cameraSubtype == newItem.cameraSubtype &&
+                            oldItem.faditorSubtype == newItem.faditorSubtype;
                 }
                 return false;
             }

@@ -309,16 +309,41 @@ public class PersonalHomePreviewTest {
     }
     @Test public void recordingCleanupWaitsForActualCameraCloseBeforeReleasingInputSurface() throws Exception {
         android.hardware.camera2.CameraDevice camera=mock(android.hardware.camera2.CameraDevice.class);
+        com.fadcam.opengl.GLRecordingPipeline pipeline=mock(com.fadcam.opengl.GLRecordingPipeline.class);
+        android.os.Handler main=mock(android.os.Handler.class);
+        java.util.concurrent.LinkedBlockingQueue<Runnable> completion=new java.util.concurrent.LinkedBlockingQueue<>();
+        java.util.concurrent.LinkedBlockingQueue<Runnable> cooldown=new java.util.concurrent.LinkedBlockingQueue<>();
+        when(main.post(any(Runnable.class))).thenAnswer(call -> completion.add(call.getArgument(0)));
+        when(main.postDelayed(any(Runnable.class),eq((long)Constants.CAMERA_RESOURCE_COOLDOWN_MS)))
+                .thenAnswer(call -> cooldown.add(call.getArgument(0)));
+        ReflectionHelpers.setField(service,"mainHandler",main);
+        ReflectionHelpers.setField(service,"sharedPreferencesManager",SharedPreferencesManager.getInstance(app));
+        ReflectionHelpers.setField(service,"glRecordingPipeline",pipeline);
         ReflectionHelpers.setField(service,"cameraDevice",camera);
-        java.util.concurrent.ExecutorService worker=java.util.concurrent.Executors.newSingleThreadExecutor();
+        ReflectionHelpers.setField(service,"recordingState",RecordingState.IN_PROGRESS);
+        ReflectionHelpers.setField(service,"recordingStartTime",1L);
+        android.hardware.camera2.CameraDevice.StateCallback callback=ReflectionHelpers.getField(service,"cameraStateCallback");
+        boolean prior=ReflectionHelpers.getStaticField(RecordingService.class,"isCameraResourceReleasing");
         try {
-            java.util.concurrent.Future<?> completion=worker.submit(() -> ReflectionHelpers.callInstanceMethod(service,"closeCameraBeforePipelineShutdown"));
+            service.onStartCommand(new Intent(Constants.INTENT_ACTION_STOP_RECORDING),0,1);
             verify(camera,timeout(1000)).close();
-            assertFalse("GL shutdown must wait for the real camera callback",completion.isDone());
-            android.hardware.camera2.CameraDevice.StateCallback callback=ReflectionHelpers.getField(service,"cameraStateCallback");
-            callback.onClosed(camera);completion.get(1,java.util.concurrent.TimeUnit.SECONDS);
+            verify(pipeline,never()).stopRecording();
+            assertTrue("GL shutdown must wait for the real camera callback",completion.isEmpty());
+            callback.onClosed(camera);
+            Runnable finished=completion.poll(2,java.util.concurrent.TimeUnit.SECONDS);
+            assertNotNull(finished);
+            finished.run();
+            verify(pipeline,times(1)).stopRecording();
             assertNull(ReflectionHelpers.getField(service,"cameraDevice"));
-        } finally {worker.shutdownNow();}
+            Runnable cooled=cooldown.poll();
+            assertNotNull(cooled);
+            cooled.run();
+        } finally {
+            callback.onClosed(camera);
+            Runnable pending=completion.poll();
+            if(pending!=null)pending.run();
+            ReflectionHelpers.setStaticField(RecordingService.class,"isCameraResourceReleasing",prior);
+        }
     }
     private TextureView readyControls() {
         ReflectionHelpers.setField(service, "previewOnlyActive", true);
